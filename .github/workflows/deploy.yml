@@ -1,1 +1,63 @@
+name: CI/CD - Serverless deploy
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-3
+  SLS_TELEMETRY_DISABLED: "1"
+  CI: "true"
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Serverless CLI
+        run: npm i -g serverless@4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Show versions
+        run: |
+          node -v
+          serverless --version
+          python --version
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate Serverless config
+        run: serverless print --stage dev --region $AWS_REGION
+
+      - name: Deploy (dev)
+        run: serverless deploy --stage dev --region $AWS_REGION --conceal
+
+      - name: Show endpoints
+        run: serverless info --stage dev --region $AWS_REGION --verbose | tee sls-info.txt
+
+      - name: Smoke test /health
+        run: |
+          URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1)
+          echo "Health URL: $URL"
+          test -n "$URL"
+          sudo apt-get update -y && sudo apt-get install -y jq
+          curl -sS "$URL" | jq -e '.ok == true'
 
