@@ -13,6 +13,10 @@ env:
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
+    env:
+      AWS_REGION: eu-west-3
+      SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+
 
     steps:
       - name: Checkout
