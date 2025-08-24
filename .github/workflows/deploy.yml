@@ -69,7 +69,7 @@ jobs:
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "health=${BASE%/}/health" >> "$GITHUB_OUTPUT"
           echo "predict=${BASE%/}/predict" >> "$GITHUB_OUTPUT"
-          
+
       - name: Smoke test /health
         run: |
           sudo apt-get update -y >/dev/null
@@ -112,7 +112,7 @@ jobs:
           fi
 
           echo "Smoke test /health OK ✅"
- 
+   
 
       - name: Show endpoints (optional)
         run: |
