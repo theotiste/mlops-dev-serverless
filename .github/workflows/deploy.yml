@@ -69,15 +69,50 @@ jobs:
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "health=${BASE%/}/health" >> "$GITHUB_OUTPUT"
           echo "predict=${BASE%/}/predict" >> "$GITHUB_OUTPUT"
-
+          
       - name: Smoke test /health
         run: |
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
+
           URL="${{ steps.urls.outputs.health }}"
           echo "Health URL: $URL"
           test -n "$URL"
-          curl -sS "$URL" | jq -e '.ok == true' >/dev/null
+
+          # Retry jusqu'à 5 fois (1s, 2s, 4s, 8s, 16s)
+          ok=false
+          for i in 0 1 2 3 4; do
+            HTTP_CODE=$(curl -sS -o resp.json -w '%{http_code}' "$URL" || echo 000)
+            echo "HTTP $HTTP_CODE"
+            echo "Body:"
+            cat resp.json || true
+            echo
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              # Accepte soit { "ok": true } soit { "body": "{\"ok\":true,...}" }
+              if jq -e '
+                    if type=="object" and has("ok") then
+                      .ok == true
+                    elif type=="object" and has("body") then
+                      (try (.body|fromjson|.ok == true) catch false)
+                    else
+                      false
+                    end
+                  ' resp.json >/dev/null; then
+                ok=true
+                break
+              fi
+            fi
+            sleep $((2**i))
+          done
+
+          if [ "$ok" != "true" ]; then
+            echo "Smoke test /health FAILED"
+            exit 1
+          fi
+
+          echo "Smoke test /health OK ✅"
+ 
 
       - name: Show endpoints (optional)
         run: |
