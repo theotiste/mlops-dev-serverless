@@ -1,22 +1,20 @@
-name: CI/CD - Serverless deploy
+name: deploy-dev
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:
+    branches: [ main ]
+    paths:
+      - "handler.py"
+      - "serverless.yaml"
+      - ".github/workflows/**"
 
 env:
   AWS_REGION: eu-west-3
-  SLS_TELEMETRY_DISABLED: "1"
-  CI: "true"
+  STACK_NAME: cancer-prediction-api-dev   # service "cancer-prediction-api" + stage "dev"
 
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: eu-west-3
-      SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-
 
     steps:
       - name: Checkout
@@ -25,7 +23,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
       - name: Install Serverless CLI
         run: npm i -g serverless@4
@@ -33,12 +31,13 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
       - name: Show versions
         run: |
           node -v
-          serverless --version
+          npm -v
+          serverless -v
           python --version
 
       - name: Configure AWS credentials
@@ -49,19 +48,41 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Validate Serverless config
-        run: serverless print --stage dev --region $AWS_REGION
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: serverless print --stage dev --region $AWS_REGION > /dev/null
 
       - name: Deploy (dev)
-        run: serverless deploy --stage dev --region $AWS_REGION --conceal
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: serverless deploy --stage dev --region $AWS_REGION --verbose
 
-      - name: Show endpoints
-        run: serverless info --stage dev --region $AWS_REGION --verbose | tee sls-info.txt
+      - name: Fetch API base URL from CloudFormation
+        id: urls
+        run: |
+          BASE=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'].OutputValue" \
+            --output text)
+          echo "Base URL: $BASE"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "health=${BASE%/}/health" >> "$GITHUB_OUTPUT"
+          echo "predict=${BASE%/}/predict" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test /health
         run: |
-          URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1)
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+          URL="${{ steps.urls.outputs.health }}"
           echo "Health URL: $URL"
           test -n "$URL"
-          sudo apt-get update -y && sudo apt-get install -y jq
-          curl -sS "$URL" | jq -e '.ok == true'
+          curl -sS "$URL" | jq -e '.ok == true' >/dev/null
+
+      - name: Show endpoints (optional)
+        run: |
+          echo "BASE=${{ steps.urls.outputs.base }}"
+          echo "HEALTH=${{ steps.urls.outputs.health }}"
+          echo "PREDICT=${{ steps.urls.outputs.predict }}"
+
 
