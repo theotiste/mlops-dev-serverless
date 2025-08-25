@@ -97,9 +97,14 @@ jobs:
 
       - name: Smoke test /predict
         run: |
-          PRED_URL="${BASE_URL}/predict"
-          echo "Predict URL: ${PRED_URL}"
-          # payload exemple: 30 features dans l’ordre attendu
+          # outils
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq curl >/dev/null
+
+          PRED_URL="${BASE_URL%/}/predict"
+          echo "Predict URL: $PRED_URL"
+
+          # payload d'exemple : 30 features dans l'ordre attendu
           read -r -d '' PAYLOAD <<'JSON'
           {
             "features": [
@@ -109,20 +114,35 @@ jobs:
             ]
           }
           JSON
-          echo "Request payload:"
+
+          echo "Payload:"
           echo "$PAYLOAD" | jq .
-          RESP=$(curl -fsS -X POST "$PRED_URL" -H "Content-Type: application/json" -d "$PAYLOAD")
-          echo "Response:"
-          echo "$RESP" | jq .
-          # validations minimales
-          echo "$RESP" | jq -e '
+
+          # Appel: capture statut HTTP + corps sans échouer la commande
+          HTTP_CODE=$(curl -sS -o /tmp/predict.json -w "%{http_code}" \
+            -X POST "$PRED_URL" -H "Content-Type: application/json" \
+            --data "$PAYLOAD")
+
+          echo "HTTP: $HTTP_CODE"
+          echo "Body:"
+          cat /tmp/predict.json | sed -e 's/^/  /'
+
+          # Si non-200, on échoue en laissant les logs ci-dessus
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "Predict smoke test FAILED (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          # Validation minimale de la forme de réponse
+          jq -e '
             (.predictions|type=="array") and
             (.probabilities|type=="array") and
             ((.predictions|length)==1) and
             ((.probabilities|length)==1)
-          ' >/dev/null
-          echo "Predict smoke test OK"
+          ' /tmp/predict.json >/dev/null
 
+          echo "Predict smoke test OK ✅"
+     
       - name: Show endpoints (optional) and save
         run: |
           echo "BASE_URL=${BASE_URL}"
