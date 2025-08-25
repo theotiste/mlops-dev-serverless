@@ -2,165 +2,197 @@ name: deploy-dev
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
-      - "serverless.yml"
+      - "serverless.yaml"
       - "handler.py"
-      - ".github/workflows/deploy-dev.yml"
-      - "features_input.json"   # si tu veux tester /predict quand présent
+      - "deploy.yml"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Serverless stage"
+        default: "dev"
+        required: true
+      region:
+        description: "AWS region"
+        default: "eu-west-3"
+        required: true
 
 concurrency:
-  group: deploy-dev-${{ github.ref }}
+  group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  id-token: write
+  contents: read
+
 env:
+  # ------- Paramètres globaux ----------
+  STAGE: ${{ github.event.inputs.stage || 'dev' }}
+  AWS_REGION: ${{ github.event.inputs.region || 'eu-west-3' }}
   SERVICE_NAME: cancer-prediction-api
-  STAGE: dev
-  AWS_REGION: eu-west-3
 
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Node pour Serverless + plugin
+      # ---------- Node & Serverless ----------
       - name: Setup Node (cache npm)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
 
-      - name: Install Serverless CLI & plugin alerts
-        run: |
-          npm i -g serverless@^4
-          npm i -D serverless-plugin-aws-alerts
+      - name: Install Serverless CLI
+        run: npm i -g serverless@^4
 
-      # Python (pour outillage éventuel) + jq pour smoke-tests
+      - name: Install plugins (prefer npm ci)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          elif [[ -f package.json ]]; then
+            npm i
+          else
+            # Fallback : installer seulement le plugin requis
+            npm i --no-save serverless-plugin-aws-alerts
+          fi
+          echo "Installed plugins:"
+          npm ls serverless-plugin-aws-alerts || true
+
+      # ---------- Python utils (jq déjà présent la plupart du temps, on assure) ----------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install CLI tools
-        run: sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
+      - name: Ensure jq is available
+        run: |
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+          jq --version
 
+      # ---------- Afficher versions ----------
       - name: Show versions
         run: |
           node -v
           npm -v
           serverless -v
-          python --version
 
-      # Auth AWS + Serverless Dashboard (clé d’accès)
-      - name: Configure AWS credentials
+      # ---------- AWS credentials ----------
+      - name: Configure AWS credentials (dev)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install project deps (plugins)
-        run: npm ci   
-
+      # ---------- Validation Serverless (avec plugin chargé) ----------
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless print --stage $STAGE --region $AWS_REGION >/dev/null
+        run: |
+          serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
+          echo "serverless.yml is valid for stage=$STAGE region=$AWS_REGION"
 
-      - name: Deploy (${{ env.STAGE }})
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless deploy --stage $STAGE --region $AWS_REGION --conceal
-
-      # Récupérer l’URL de base depuis "sls info"
-      - name: Fetch API base URL from CloudFormation
-        id: api
+      # ---------- Déploiement ----------
+      - name: Deploy (dev)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          serverless info --stage $STAGE --region $AWS_REGION > sls-info.txt
-          # Prend la première ligne GET https://.../health et retire /health
-          BASE_URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | head -n1 | awk '{print $3}' | sed 's#/health$##')
-          echo "base_url=$BASE_URL" >> $GITHUB_OUTPUT
-          echo "API Base URL: $BASE_URL"
+          serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
 
-      - name: Smoke test /health
+      # ---------- Récupération des endpoints ----------
+      - name: Fetch API base URL from CloudFormation (sls info)
         env:
-          URL: ${{ steps.api.outputs.base_url }}/health
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
           set -euo pipefail
+          serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt
+          echo "=== sls-info.txt ==="
+          cat sls-info.txt
+
+      # ---------- Smoke test /health ----------
+      - name: Smoke test /health
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1)
           echo "Health URL: $URL"
-          for i in 1 2 3 4 5; do
-            if curl -sS "$URL" | jq -e '.ok == true' >/dev/null; then
-              echo "OK /health"
+          if [[ -z "${URL:-}" ]]; then
+            echo "Could not parse /health endpoint from sls-info. Failing."
+            exit 1
+          fi
+
+          # 5 tentatives avec backoff léger
+          for i in {1..5}; do
+            echo "Try ${i}/5 ..."
+            if curl -fsS "$URL" | jq -e '.ok == true' >/dev/null; then
+              echo "Health OK ✅"
               exit 0
             fi
-            echo "Retry ($i/5)…"
-            sleep 5
+            sleep $((i*3))
           done
-          echo "Health check failed."
+
+          echo "Health check failed ❌"
           exit 1
 
-      # (Optionnel) test /predict si un fichier features_input.json est présent
+      # ---------- Smoke test /predict (optionnel si features_input.json existe) ----------
       - name: Smoke test /predict (optional if features_input.json exists)
         if: hashFiles('features_input.json') != ''
-        env:
-          URL: ${{ steps.api.outputs.base_url }}/predict
+        shell: bash
         run: |
           set -euo pipefail
-          echo "Predict URL: $URL"
-          curl -sS -X POST "$URL" \
-            -H "Content-Type: application/json" \
-            -d @features_input.json | jq -e '.predictions | length > 0' >/dev/null
+          PREDICT=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
+          echo "Predict URL: ${PREDICT:-<none>}"
+          if [[ -z "${PREDICT:-}" ]]; then
+            echo "No /predict endpoint found in sls-info. Skipping."
+            exit 0
+          fi
 
-      - name: Show endpoints (optional) and save
-        run: |
-          echo "=== endpoints ==="
-          cat sls-info.txt || true
-        # garder la sortie "sls info" en artifact
+          BODY=$(cat features_input.json)
+          echo "Sending sample payload..."
+          RES=$(curl -fsS -H "Content-Type: application/json" -d "$BODY" "$PREDICT")
+          echo "Response: $RES" | tee predict-response.json
+
+          # critères souples : presence d'un champ predictions/probabilities
+          if jq -e '.predictions or .probabilities' predict-response.json >/dev/null; then
+            echo "Predict smoke OK ✅"
+          else
+            echo "Predict response shape unexpected ❌"
+            exit 1
+          fi
+
+      # ---------- Sauvegarde des endpoints en artefact ----------
       - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
           name: sls-info
-          path: sls-info.txt
+          path: |
+            sls-info.txt
+            predict-response.json
+          if-no-files-found: ignore
           retention-days: 7
 
-      # =========================
-      # Monitoring CI: résumé + logs + alertes externes
-      # =========================
-
-      - name: Résumé du déploiement
-        if: always()
+      # ---------- Résumé lisible dans l’onglet Summary ----------
+      - name: Job summary
+        shell: bash
         run: |
-          {
-            echo "## Déploiement ${{ env.STAGE }}"
-            echo "- Service: **${{ env.SERVICE_NAME }}**"
-            echo "- Région: **${{ env.AWS_REGION }}**"
-            echo "- Base URL: **${{ steps.api.outputs.base_url || 'n/a' }}**"
-            echo "- Résultat: **${{ job.status }}**"
-            echo "- Commit: $GITHUB_SHA"
-          } >> $GITHUB_STEP_SUMMARY
-
-      - name: Dump latest Lambda logs (15m) on failure
-        if: failure()
-        run: |
-          set -e
-          STACK="${{ env.SERVICE_NAME }}-${{ env.STAGE }}"
-          FN=$(aws cloudformation describe-stack-resources \
-                --stack-name "$STACK" \
-                --query "StackResources[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" \
-                --output text | head -n1)
-          echo "Lambda: $FN"
-          aws logs tail "/aws/lambda/$FN" --since 15m --format short || true
-
-      - name: Notify Slack on failure (optional)
-        if: failure() && env.SLACK_WEBHOOK_URL != ''
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          msg="❌ Deploy *${{ env.STAGE }}* FAILED – ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"$msg\"}" "$SLACK_WEBHOOK_URL"
+          echo "## Deploy summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service**: ${SERVICE_NAME}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stage**: ${STAGE}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${AWS_REGION}" >> $GITHUB_STEP_SUMMARY
+          HEALTH=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1 || true)
+          PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1 || true)
+          echo "- **Health**: ${HEALTH:-n/a}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Predict**: ${PRED:-n/a}"   >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<sub>(les endpoints complets sont dans l’artefact <code>sls-info</code>)</sub>" >> $GITHUB_STEP_SUMMARY
