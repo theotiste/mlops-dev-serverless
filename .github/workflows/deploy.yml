@@ -43,19 +43,29 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------- Node / Serverless ----------
+      # Avec cache npm SEULEMENT si un lock file existe
       - name: Setup Node (cache npm)
+        if: hashFiles('package-lock.json','npm-shrinkwrap.json','yarn.lock') != ''
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            npm-shrinkwrap.json
+            yarn.lock
+
+      # Fallback sans cache si pas de lock file
+      - name: Setup Node (no cache)
+        if: hashFiles('package-lock.json','npm-shrinkwrap.json','yarn.lock') == ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Install Serverless CLI
         run: npm i -g serverless@^4
 
-      # ---------- Assurer la présence du plugin aws-alerts ----------
-      # 1) si package-lock.json existe : npm ci
-      # 2) sinon: npm i --no-save
-      # 3) si toujours introuvable: serverless plugin install (fallback)
+      # ---------- S'assurer que le plugin aws-alerts est dispo ----------
       - name: Ensure serverless-plugin-aws-alerts is installed
         shell: bash
         run: |
@@ -69,12 +79,11 @@ jobs:
           fi
 
           if ! node -e "require.resolve('serverless-plugin-aws-alerts')" >/dev/null 2>&1; then
-            echo "Fallback: using Serverless to install the plugin locally…"
+            echo "Fallback: installing with Serverless plugin manager…"
             serverless plugin install -n serverless-plugin-aws-alerts
           fi
 
-          echo "Plugin path:"
-          node -e "console.log(require.resolve('serverless-plugin-aws-alerts'))"
+          node -e "console.log('alerts plugin:', require.resolve('serverless-plugin-aws-alerts'))"
 
       # ---------- Python + jq ----------
       - name: Setup Python
@@ -102,7 +111,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------- Validation (plugin présent) ----------
+      # ---------- Validation ----------
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
@@ -155,7 +164,7 @@ jobs:
           PREDICT=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
           echo "Predict URL: ${PREDICT:-<none>}"
           if [[ -z "${PREDICT:-}" ]]; then
-            echo "No /predict endpoint in sls-info. Skipping."
+            echo "No /predict endpoint in sls info. Skipping."
             exit 0
           fi
           RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PREDICT")
