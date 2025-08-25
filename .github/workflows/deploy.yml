@@ -42,8 +42,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Node / Serverless ----------
-      # Avec cache npm SEULEMENT si un lock file existe
+      # -------- Node (cache npm si lock file présent) --------
       - name: Setup Node (cache npm)
         if: hashFiles('package-lock.json','npm-shrinkwrap.json','yarn.lock') != ''
         uses: actions/setup-node@v4
@@ -55,7 +54,6 @@ jobs:
             npm-shrinkwrap.json
             yarn.lock
 
-      # Fallback sans cache si pas de lock file
       - name: Setup Node (no cache)
         if: hashFiles('package-lock.json','npm-shrinkwrap.json','yarn.lock') == ''
         uses: actions/setup-node@v4
@@ -65,33 +63,26 @@ jobs:
       - name: Install Serverless CLI
         run: npm i -g serverless@^4
 
-      # ---------- S'assurer que le plugin aws-alerts est dispo ----------
+      # -------- Installer le plugin d’alertes (sans version pin) --------
       - name: Ensure serverless-plugin-aws-alerts is installed
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -f package-lock.json ]]; then
-            npm ci
-          elif [[ -f package.json ]]; then
-            npm i
-          else
-            npm i --no-save serverless-plugin-aws-alerts
-          fi
+          PKG=serverless-plugin-aws-alerts
+          echo "Installing $PKG@latest…"
+          npm i --no-save "${PKG}@latest" \
+            || serverless plugin install -n "${PKG}"
+          # Vérif presence
+          node -e "console.log('Plugin path:', require.resolve('${PKG}'))" || true
+          serverless plugin list || true
 
-          if ! node -e "require.resolve('serverless-plugin-aws-alerts')" >/dev/null 2>&1; then
-            echo "Fallback: installing with Serverless plugin manager…"
-            serverless plugin install -n serverless-plugin-aws-alerts
-          fi
-
-          node -e "console.log('alerts plugin:', require.resolve('serverless-plugin-aws-alerts'))"
-
-      # ---------- Python + jq ----------
+      # -------- Python + jq --------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Ensure jq installed
+      - name: Ensure jq is installed
         run: |
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
@@ -103,7 +94,7 @@ jobs:
           npm -v
           serverless -v
 
-      # ---------- AWS creds ----------
+      # -------- AWS creds --------
       - name: Configure AWS credentials (dev)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -111,7 +102,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------- Validation ----------
+      # -------- Validation --------
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
@@ -120,14 +111,14 @@ jobs:
           serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
           echo "serverless.yaml OK (stage=$STAGE, region=$AWS_REGION)"
 
-      # ---------- Déploiement ----------
+      # -------- Déploiement --------
       - name: Deploy (dev)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
           serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
 
-      # ---------- Récupérer les endpoints ----------
+      # -------- Lire les endpoints --------
       - name: Fetch API base URL from CloudFormation (sls info)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
@@ -136,7 +127,7 @@ jobs:
           echo "=== sls-info.txt ==="
           cat sls-info.txt
 
-      # ---------- Smoke test /health ----------
+      # -------- Smoke test /health --------
       - name: Smoke test /health
         shell: bash
         run: |
@@ -155,7 +146,7 @@ jobs:
           done
           echo "Health check failed ❌"; exit 1
 
-      # ---------- Smoke /predict (optionnel) ----------
+      # -------- Smoke /predict (optionnel) --------
       - name: Smoke test /predict (optional if features_input.json exists)
         if: hashFiles('features_input.json') != ''
         shell: bash
@@ -171,7 +162,7 @@ jobs:
           echo "$RES" | tee predict-response.json
           jq -e '.predictions or .probabilities' predict-response.json >/dev/null
 
-      # ---------- Artefacts & résumé ----------
+      # -------- Artefacts & résumé --------
       - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
