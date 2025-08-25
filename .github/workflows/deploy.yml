@@ -6,7 +6,6 @@ on:
     paths:
       - "serverless.yaml"
       - "handler.py"
-      - "deploy.yml"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/deploy.yml"
@@ -30,10 +29,10 @@ permissions:
   contents: read
 
 env:
-  # ------- Paramètres globaux ----------
   STAGE: ${{ github.event.inputs.stage || 'dev' }}
   AWS_REGION: ${{ github.event.inputs.region || 'eu-west-3' }}
   SERVICE_NAME: cancer-prediction-api
+  SLS_TELEMETRY_DISABLED: "1"
 
 jobs:
   deploy-dev:
@@ -43,7 +42,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Node & Serverless ----------
+      # ---------- Node / Serverless ----------
       - name: Setup Node (cache npm)
         uses: actions/setup-node@v4
         with:
@@ -53,7 +52,11 @@ jobs:
       - name: Install Serverless CLI
         run: npm i -g serverless@^4
 
-      - name: Install plugins (prefer npm ci)
+      # ---------- Assurer la présence du plugin aws-alerts ----------
+      # 1) si package-lock.json existe : npm ci
+      # 2) sinon: npm i --no-save
+      # 3) si toujours introuvable: serverless plugin install (fallback)
+      - name: Ensure serverless-plugin-aws-alerts is installed
         shell: bash
         run: |
           set -euo pipefail
@@ -62,32 +65,36 @@ jobs:
           elif [[ -f package.json ]]; then
             npm i
           else
-            # Fallback : installer seulement le plugin requis
             npm i --no-save serverless-plugin-aws-alerts
           fi
-          echo "Installed plugins:"
-          npm ls serverless-plugin-aws-alerts || true
 
-      # ---------- Python utils (jq déjà présent la plupart du temps, on assure) ----------
+          if ! node -e "require.resolve('serverless-plugin-aws-alerts')" >/dev/null 2>&1; then
+            echo "Fallback: using Serverless to install the plugin locally…"
+            serverless plugin install -n serverless-plugin-aws-alerts
+          fi
+
+          echo "Plugin path:"
+          node -e "console.log(require.resolve('serverless-plugin-aws-alerts'))"
+
+      # ---------- Python + jq ----------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Ensure jq is available
+      - name: Ensure jq installed
         run: |
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
           jq --version
 
-      # ---------- Afficher versions ----------
       - name: Show versions
         run: |
           node -v
           npm -v
           serverless -v
 
-      # ---------- AWS credentials ----------
+      # ---------- AWS creds ----------
       - name: Configure AWS credentials (dev)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -95,13 +102,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------- Validation Serverless (avec plugin chargé) ----------
+      # ---------- Validation (plugin présent) ----------
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
+          set -euo pipefail
           serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
-          echo "serverless.yml is valid for stage=$STAGE region=$AWS_REGION"
+          echo "serverless.yaml OK (stage=$STAGE, region=$AWS_REGION)"
 
       # ---------- Déploiement ----------
       - name: Deploy (dev)
@@ -110,12 +118,11 @@ jobs:
         run: |
           serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
 
-      # ---------- Récupération des endpoints ----------
+      # ---------- Récupérer les endpoints ----------
       - name: Fetch API base URL from CloudFormation (sls info)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          set -euo pipefail
           serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt
           echo "=== sls-info.txt ==="
           cat sls-info.txt
@@ -127,12 +134,8 @@ jobs:
           set -euo pipefail
           URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1)
           echo "Health URL: $URL"
-          if [[ -z "${URL:-}" ]]; then
-            echo "Could not parse /health endpoint from sls-info. Failing."
-            exit 1
-          fi
+          test -n "$URL"
 
-          # 5 tentatives avec backoff léger
           for i in {1..5}; do
             echo "Try ${i}/5 ..."
             if curl -fsS "$URL" | jq -e '.ok == true' >/dev/null; then
@@ -141,11 +144,9 @@ jobs:
             fi
             sleep $((i*3))
           done
+          echo "Health check failed ❌"; exit 1
 
-          echo "Health check failed ❌"
-          exit 1
-
-      # ---------- Smoke test /predict (optionnel si features_input.json existe) ----------
+      # ---------- Smoke /predict (optionnel) ----------
       - name: Smoke test /predict (optional if features_input.json exists)
         if: hashFiles('features_input.json') != ''
         shell: bash
@@ -154,24 +155,14 @@ jobs:
           PREDICT=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
           echo "Predict URL: ${PREDICT:-<none>}"
           if [[ -z "${PREDICT:-}" ]]; then
-            echo "No /predict endpoint found in sls-info. Skipping."
+            echo "No /predict endpoint in sls-info. Skipping."
             exit 0
           fi
+          RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PREDICT")
+          echo "$RES" | tee predict-response.json
+          jq -e '.predictions or .probabilities' predict-response.json >/dev/null
 
-          BODY=$(cat features_input.json)
-          echo "Sending sample payload..."
-          RES=$(curl -fsS -H "Content-Type: application/json" -d "$BODY" "$PREDICT")
-          echo "Response: $RES" | tee predict-response.json
-
-          # critères souples : presence d'un champ predictions/probabilities
-          if jq -e '.predictions or .probabilities' predict-response.json >/dev/null; then
-            echo "Predict smoke OK ✅"
-          else
-            echo "Predict response shape unexpected ❌"
-            exit 1
-          fi
-
-      # ---------- Sauvegarde des endpoints en artefact ----------
+      # ---------- Artefacts & résumé ----------
       - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
@@ -182,7 +173,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # ---------- Résumé lisible dans l’onglet Summary ----------
       - name: Job summary
         shell: bash
         run: |
@@ -194,5 +184,3 @@ jobs:
           PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1 || true)
           echo "- **Health**: ${HEALTH:-n/a}" >> $GITHUB_STEP_SUMMARY
           echo "- **Predict**: ${PRED:-n/a}"   >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "<sub>(les endpoints complets sont dans l’artefact <code>sls-info</code>)</sub>" >> $GITHUB_STEP_SUMMARY
