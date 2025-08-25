@@ -1,0 +1,153 @@
+name: deploy-dev
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  STAGE: dev
+  AWS_REGION: eu-west-3
+  SERVICE_NAME: cancer-prediction-api
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.12"
+  SLS_TELEMETRY_DISABLED: "1"
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Setup Node (avec cache npm seulement si un lockfile existe)
+      - name: Setup Node (cache npm)
+        if: ${{ hashFiles('package-lock.json') != '' || hashFiles('npm-shrinkwrap.json') != '' || hashFiles('yarn.lock') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Node (no cache)
+        if: ${{ hashFiles('package-lock.json') == '' && hashFiles('npm-shrinkwrap.json') == '' && hashFiles('yarn.lock') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Serverless CLI
+        run: npm i -g serverless@4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Show versions
+        run: |
+          node -v
+          npm -v
+          serverless --version
+          python -V
+          pip -V
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Validate Serverless config
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          SLS_ACCESS_KEY:        ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          serverless print --stage "$STAGE" --region "$AWS_REGION" > /dev/null
+          echo "Serverless config OK."
+
+      - name: Deploy (dev)
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          SLS_ACCESS_KEY:        ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          npx serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
+
+      - name: Fetch API base URL from CloudFormation
+        id: api
+        run: |
+          set -euo pipefail
+          STACK="${{ env.SERVICE_NAME }}-${{ env.STAGE }}"
+          BASE_URL=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'].OutputValue" --output text 2>/dev/null || true)
+
+          if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "None" ]; then
+            echo "CFN output not found, fallback to 'sls info'…"
+            BASE_URL=$(serverless info --stage "${{ env.STAGE }}" --region "${{ env.AWS_REGION }}" \
+              | awk '/endpoints:/{getline; print $1}' | sed 's/\/health.*//')
+          fi
+
+          if [ -z "$BASE_URL" ]; then
+            echo "Unable to determine API base URL"; exit 1
+          fi
+
+          echo "BASE_URL=$BASE_URL" | tee -a "$GITHUB_OUTPUT"
+          echo "API base: $BASE_URL"
+
+      - name: Smoke test /health
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+
+          BASE="${{ steps.api.outputs.BASE_URL }}"
+          URL="${BASE%/}/health"         # retire un éventuel slash final puis ajoute /health
+          echo "Health URL: $URL"
+
+          for i in {1..5}; do
+            CODE=$(curl -sS -w "%{http_code}" -o out.json "$URL" || true)
+            echo "HTTP $CODE"
+            cat out.json || true
+
+            if [ "$CODE" = "200" ] && jq -e '.ok == true' out.json >/dev/null 2>&1; then
+              echo "Health OK."; break
+            fi
+
+            if [ $i -eq 5 ]; then
+              echo "Health check failed."; exit 1
+            fi
+            echo "Retrying ($i/5)…"; sleep 3
+          done
+
+      - name: Smoke test /predict (optional if features_input.json exists)
+        if: ${{ hashFiles('features_input.json') != '' }}
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.api.outputs.BASE_URL }}"
+          URL="${BASE%/}/predict"
+          echo "Predict URL: $URL"
+  
+          echo "Body:"
+          cat features_input.json
+
+          CODE=$(curl -sS -H "Content-Type: application/json" \
+                 -d @features_input.json -w "%{http_code}" -o out.json "$URL" || true)
+          echo "HTTP $CODE"
+          cat out.json || true
+
+          test "$CODE" = "200"
+          jq -e '.predictions | length >= 1' out.json >/dev/null
+
+      - name: Show endpoints (optional) and save
+        run: |
+          serverless info --stage "$STAGE" --region "$AWS_REGION" | tee sls-info.txt || true
+
+      - name: Upload sls info
+        uses: actions/upload-artifact@v4
+        with:
+          name: sls-info
+          path: sls-info.txt
+          if-no-files-found: warn
+          retention-days: 3
