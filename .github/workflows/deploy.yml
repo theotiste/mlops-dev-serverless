@@ -64,6 +64,53 @@ jobs:
           echo "-----"
           cat sls-info.txt
 
+      - name: Fetch API base URL from CloudFormation (robuste)
+        id: baseurl
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1) Première tentative : extraire directement l'URL /health depuis "sls info"
+          serverless info --stage $STAGE --region $AWS_REGION | tee sls-info.txt
+          HEALTH=$(sed -n 's/.*GET - \(https[^ ]*\/health\).*/\1/p' sls-info.txt | head -n1 || true)
+
+          # 2) Si on n'a pas l'URL /health, récupérer l'URL de base via CloudFormation
+          if [[ -z "$HEALTH" ]]; then
+            # Récupère le nom exact du stack depuis "sls info" (fiable même si le service change)
+            STACK=$(sed -n 's/^stack:[[:space:]]*//p' sls-info.txt | head -n1)
+            echo "Stack: $STACK"
+
+            BASE=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --query "Stacks[0].Outputs[?starts_with(OutputKey, 'HttpApi') || OutputKey=='ServiceEndpoint'].OutputValue" \
+              --output text 2>/dev/null || true)
+
+            if [[ -n "$BASE" && "$BASE" != "None" ]]; then
+              # Normalise le trailing slash
+              BASE="${BASE%/}"
+              HEALTH="$BASE/health"
+            fi
+          fi
+
+          echo "BaseURL: ${BASE:-''}"
+          echo "HealthURL: ${HEALTH:-''}"
+
+          # Exposer les sorties pour les étapes suivantes
+          echo "base=${BASE:-}"   >> "$GITHUB_OUTPUT"
+          echo "health=${HEALTH:-}" >> "$GITHUB_OUTPUT"
+
+          # Échec contrôlé si on n'a vraiment rien
+          test -n "${HEALTH:-}"
+
+      - name: Show endpoints (sauvegarde)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sls-info-${{ env.STAGE }}
+          path: sls-info.txt
+          if-no-files-found: ignore
+   
+
       - name: Smoke test /health
         run: |
           sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
