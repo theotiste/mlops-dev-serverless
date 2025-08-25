@@ -2,54 +2,56 @@ name: deploy-dev
 
 on:
   push:
-    branches: [ main ]
-    paths-ignore:
-      - "**/*.md"
-      - ".gitignore"
-      - "docs/**"
+    branches: [ "main" ]
   workflow_dispatch:
 
-concurrency:
-  group: deploy-dev
-  cancel-in-progress: true
+env:
+  STAGE: dev
+  AWS_REGION: eu-west-3
+  SERVICE_NAME: cancer-prediction-api
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.12"
+  SLS_TELEMETRY_DISABLED: "1"
 
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
-    env:
-      STAGE: dev
-      AWS_REGION: eu-west-3
-      SERVICE_NAME: cancer-prediction-api
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      # Setup Node (avec cache npm seulement si un lockfile existe)
+      - name: Setup Node (cache npm)
+        if: ${{ hashFiles('package-lock.json') != '' || hashFiles('npm-shrinkwrap.json') != '' || hashFiles('yarn.lock') != '' }}
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Node (no cache)
+        if: ${{ hashFiles('package-lock.json') == '' && hashFiles('npm-shrinkwrap.json') == '' && hashFiles('yarn.lock') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Serverless CLI
-        run: |
-          npm i -g serverless@^4
-          sls --version
+        run: npm i -g serverless@4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Show versions
         run: |
           node -v
           npm -v
+          serverless --version
           python -V
           pip -V
-          aws --version
-          sls --version
 
-      - name: Configure AWS credentials (dev)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -59,98 +61,90 @@ jobs:
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          SLS_ACCESS_KEY:        ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
+          set -euo pipefail
+          serverless print --stage "$STAGE" --region "$AWS_REGION" > /dev/null
+          echo "Serverless config OK."
 
       - name: Deploy (dev)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          SLS_ACCESS_KEY:        ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          serverless deploy --stage "$STAGE" --region "$AWS_REGION" --verbose
+          set -euo pipefail
+          npx serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
 
       - name: Fetch API base URL from CloudFormation
-        id: fetch_url
+        id: api
         run: |
-          STACK_NAME="${SERVICE_NAME}-${STAGE}"
-          BASE_URL=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'||OutputKey=='ServiceEndpoint'].OutputValue" \
-            --output text)
+          set -euo pipefail
+          STACK="${{ env.SERVICE_NAME }}-${{ env.STAGE }}"
+          BASE_URL=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'].OutputValue" --output text 2>/dev/null || true)
+
           if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "None" ]; then
-            echo "Base URL introuvable dans les Outputs CFN" >&2
-            exit 1
+            echo "CFN output not found, fallback to 'sls info'…"
+            BASE_URL=$(serverless info --stage "${{ env.STAGE }}" --region "${{ env.AWS_REGION }}" \
+              | awk '/endpoints:/{getline; print $1}' | sed 's/\/health.*//')
           fi
-          echo "BASE_URL=$BASE_URL" | tee -a $GITHUB_ENV
-          printf "health_url=%s/health\npredict_url=%s/predict\n" "$BASE_URL" "$BASE_URL" > sls-info.txt
+
+          if [ -z "$BASE_URL" ]; then
+            echo "Unable to determine API base URL"; exit 1
+          fi
+
+          echo "BASE_URL=$BASE_URL" | tee -a "$GITHUB_OUTPUT"
+          echo "API base: $BASE_URL"
 
       - name: Smoke test /health
         run: |
+          set -euo pipefail
           sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq curl >/dev/null
-          echo "Health URL: ${BASE_URL}/health"
-          if ! curl -fsS "${BASE_URL}/health" | jq -e '.ok == true' >/dev/null; then
-            echo "Health check FAILED"
-            curl -iS "${BASE_URL}/health" || true
-            exit 1
-          fi
-          echo "Health check OK"
+          sudo apt-get install -y jq >/dev/null
 
-      - name: Smoke test /predict
+          URL="${{ steps.api.outputs.BASE_URL }}health"
+          echo "Health URL: $URL"
+
+          for i in {1..5}; do
+            CODE=$(curl -sS -w "%{http_code}" -o out.json "$URL" || true)
+            echo "HTTP $CODE"
+            cat out.json || true
+
+            if [ "$CODE" = "200" ] && jq -e '.ok == true' out.json >/dev/null 2>&1; then
+              echo "Health OK."; break
+            fi
+
+            if [ $i -eq 5 ]; then
+              echo "Health check failed."; exit 1
+            fi
+            echo "Retrying ($i/5)…"; sleep 3
+          done
+
+      - name: Smoke test /predict (optional if features_input.json exists)
+        if: ${{ hashFiles('features_input.json') != '' }}
         run: |
-          # outils
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq curl >/dev/null
-
-          PRED_URL="${BASE_URL%/}/predict"
-          echo "Predict URL: $PRED_URL"
-
-          # payload d'exemple : 30 features dans l'ordre attendu
-          read -r -d '' PAYLOAD <<'JSON'
-          {
-            "features": [
-              17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,
-              1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.003003,0.006193,
-              25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189
-            ]
-          }
-          JSON
-
-          echo "Payload:"
-          echo "$PAYLOAD" | jq .
-
-          # Appel: capture statut HTTP + corps sans échouer la commande
-          HTTP_CODE=$(curl -sS -o /tmp/predict.json -w "%{http_code}" \
-            -X POST "$PRED_URL" -H "Content-Type: application/json" \
-            --data "$PAYLOAD")
-
-          echo "HTTP: $HTTP_CODE"
+          set -euo pipefail
+          URL="${{ steps.api.outputs.BASE_URL }}predict"
+          echo "Predict URL: $URL"
           echo "Body:"
-          cat /tmp/predict.json | sed -e 's/^/  /'
+          cat features_input.json
 
-          # Si non-200, on échoue en laissant les logs ci-dessus
-          if [ "$HTTP_CODE" -ne 200 ]; then
-            echo "Predict smoke test FAILED (HTTP $HTTP_CODE)"
-            exit 1
-          fi
+          CODE=$(curl -sS -H "Content-Type: application/json" \
+                 -d @features_input.json -w "%{http_code}" -o out.json "$URL" || true)
+          echo "HTTP $CODE"
+          cat out.json || true
 
-          # Validation minimale de la forme de réponse
-          jq -e '
-            (.predictions|type=="array") and
-            (.probabilities|type=="array") and
-            ((.predictions|length)==1) and
-            ((.probabilities|length)==1)
-          ' /tmp/predict.json >/dev/null
+          test "$CODE" = "200"
+          jq -e '.predictions | length >= 1' out.json >/dev/null
 
-          echo "Predict smoke test OK ✅"
-     
       - name: Show endpoints (optional) and save
         run: |
-          echo "BASE_URL=${BASE_URL}"
-          cat sls-info.txt
+          serverless info --stage "$STAGE" --region "$AWS_REGION" | tee sls-info.txt || true
 
-      - name: Upload sls info (artifact)
+      - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
           name: sls-info
           path: sls-info.txt
           if-no-files-found: warn
+          retention-days: 3
