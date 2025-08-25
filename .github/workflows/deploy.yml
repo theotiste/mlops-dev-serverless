@@ -2,19 +2,25 @@ name: deploy-dev
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
     paths:
-      - "handler.py"
       - "serverless.yaml"
+      - "handler.py"
+      - "model-layer.zip"
       - ".github/workflows/**"
+  workflow_dispatch:
 
 env:
   AWS_REGION: eu-west-3
-  STACK_NAME: cancer-prediction-api-dev   # service "cancer-prediction-api" + stage "dev"
+
+concurrency:
+  group: sls-dev-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -23,22 +29,15 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
-      - name: Install Serverless CLI
-        run: npm i -g serverless@4
+          node-version: 20
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Show versions
-        run: |
-          node -v
-          npm -v
-          serverless -v
-          python --version
+      - name: Install Serverless CLI
+        run: npm i -g serverless@4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -50,74 +49,71 @@ jobs:
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless print --stage dev --region $AWS_REGION > /dev/null
+        run: serverless print --stage dev --region $AWS_REGION
 
       - name: Deploy (dev)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless deploy --stage dev --region $AWS_REGION --verbose
+        run: serverless deploy --stage dev --region $AWS_REGION --conceal
 
-      - name: Fetch API base URL from CloudFormation
-        id: urls
+      - name: Show endpoints (and save)
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          BASE=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'].OutputValue" \
-            --output text)
-          echo "Base URL: $BASE"
-          echo "base=$BASE" >> "$GITHUB_OUTPUT"
-          echo "health=${BASE%/}/health" >> "$GITHUB_OUTPUT"
-          echo "predict=${BASE%/}/predict" >> "$GITHUB_OUTPUT"
+          serverless info --stage dev --region $AWS_REGION | tee sls-info.txt
+          echo "-----"
+          cat sls-info.txt
 
       - name: Smoke test /health
         run: |
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
-
-          URL="${{ steps.urls.outputs.health }}"
+          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
+          URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1)
           echo "Health URL: $URL"
-          test -n "$URL"
-
-          # Retry jusqu'à 5 fois (1s, 2s, 4s, 8s, 16s)
-          ok=false
-          for i in 0 1 2 3 4; do
-            HTTP_CODE=$(curl -sS -o resp.json -w '%{http_code}' "$URL" || echo 000)
-            echo "HTTP $HTTP_CODE"
-            echo "Body:"
+          # retry simple (10 tentatives)
+          for i in {1..10}; do
+            CODE=$(curl -s -o resp.json -w "%{http_code}" "$URL")
+            echo "HTTP $CODE"
             cat resp.json || true
             echo
-
-            if [ "$HTTP_CODE" = "200" ]; then
-              # Accepte soit { "ok": true } soit { "body": "{\"ok\":true,...}" }
-              if jq -e '
-                    if type=="object" and has("ok") then
-                      .ok == true
-                    elif type=="object" and has("body") then
-                      (try (.body|fromjson|.ok == true) catch false)
-                    else
-                      false
-                    end
-                  ' resp.json >/dev/null; then
-                ok=true
-                break
-              fi
-            fi
-            sleep $((2**i))
+            jq -e '.ok == true' resp.json && exit 0
+            sleep 4
           done
+          echo "Smoke test /health FAILED"
+          exit 1
 
-          if [ "$ok" != "true" ]; then
-            echo "Smoke test /health FAILED"
-            exit 1
-          fi
-
-          echo "Smoke test /health OK ✅"
-   
-
-      - name: Show endpoints (optional)
+      - name: Smoke test /predict
         run: |
-          echo "BASE=${{ steps.urls.outputs.base }}"
-          echo "HEALTH=${{ steps.urls.outputs.health }}"
-          echo "PREDICT=${{ steps.urls.outputs.predict }}"
+          URL=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
+          echo "Predict URL: $URL"
 
+          # Payload d'exemple (30 features, même ordre que ton EXPECTED_FEATURES)
+          cat > payload.json << 'JSON'
+          {
+            "features": [
+              17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,
+              1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,
+              25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189
+            ]
+          }
+          JSON
 
+          # retry (au cas où la warmup prenne un peu de temps)
+          for i in {1..10}; do
+            CODE=$(curl -sS -o resp.json -w "%{http_code}" -H "Content-Type: application/json" -d @payload.json "$URL" || echo 000)
+            echo "HTTP $CODE"
+            cat resp.json || true
+            echo
+            if [ "$CODE" = "200" ] && jq -e '.predictions and .probabilities' resp.json >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 4
+          done
+          echo "Smoke test /predict FAILED"
+          exit 1
+
+      - name: Upload sls info (artifact)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sls-info
+          path: sls-info.txt
