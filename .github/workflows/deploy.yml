@@ -6,19 +6,16 @@ on:
     paths:
       - "serverless.yaml"
       - "handler.py"
-      - "package.json"
-      - "package-lock.json"
       - ".github/workflows/deploy.yml"
+      - "features_input.json"
   workflow_dispatch:
     inputs:
       stage:
-        description: "Serverless stage"
+        description: "Stage"
         default: "dev"
-        required: true
       region:
         description: "AWS region"
         default: "eu-west-3"
-        required: true
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -37,12 +34,11 @@ env:
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -------- Node (cache npm si lock file présent) --------
+      # Node (cache npm si lock file)
       - name: Setup Node (cache npm)
         if: hashFiles('package-lock.json','npm-shrinkwrap.json','yarn.lock') != ''
         uses: actions/setup-node@v4
@@ -63,26 +59,13 @@ jobs:
       - name: Install Serverless CLI
         run: npm i -g serverless@^4
 
-      # -------- Installer le plugin d’alertes (sans version pin) --------
-      - name: Ensure serverless-plugin-aws-alerts is installed
-        shell: bash
-        run: |
-          set -euo pipefail
-          PKG=serverless-plugin-aws-alerts
-          echo "Installing $PKG@latest…"
-          npm i --no-save "${PKG}@latest" \
-            || serverless plugin install -n "${PKG}"
-          # Vérif presence
-          node -e "console.log('Plugin path:', require.resolve('${PKG}'))" || true
-          serverless plugin list || true
-
-      # -------- Python + jq --------
+      # Python + jq
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Ensure jq is installed
+      - name: Install jq
         run: |
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
@@ -94,32 +77,32 @@ jobs:
           npm -v
           serverless -v
 
-      # -------- AWS creds --------
-      - name: Configure AWS credentials (dev)
+      # AWS creds
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # -------- Validation --------
+      # Validation
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
           set -euo pipefail
           serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
-          echo "serverless.yaml OK (stage=$STAGE, region=$AWS_REGION)"
+          echo "serverless.yaml OK"
 
-      # -------- Déploiement --------
-      - name: Deploy (dev)
+      # Déploiement
+      - name: Deploy
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
           serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
 
-      # -------- Lire les endpoints --------
-      - name: Fetch API base URL from CloudFormation (sls info)
+      # Récupère les endpoints
+      - name: Fetch API base URL (sls info)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
@@ -127,7 +110,7 @@ jobs:
           echo "=== sls-info.txt ==="
           cat sls-info.txt
 
-      # -------- Smoke test /health --------
+      # Smoke /health
       - name: Smoke test /health
         shell: bash
         run: |
@@ -146,23 +129,23 @@ jobs:
           done
           echo "Health check failed ❌"; exit 1
 
-      # -------- Smoke /predict (optionnel) --------
-      - name: Smoke test /predict (optional if features_input.json exists)
+      # Smoke /predict (optionnel)
+      - name: Smoke test /predict (optional)
         if: hashFiles('features_input.json') != ''
         shell: bash
         run: |
           set -euo pipefail
-          PREDICT=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
-          echo "Predict URL: ${PREDICT:-<none>}"
-          if [[ -z "${PREDICT:-}" ]]; then
+          PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
+          echo "Predict URL: ${PRED:-<none>}"
+          if [[ -z "${PRED:-}" ]]; then
             echo "No /predict endpoint in sls info. Skipping."
             exit 0
           fi
-          RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PREDICT")
+          RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PRED")
           echo "$RES" | tee predict-response.json
           jq -e '.predictions or .probabilities' predict-response.json >/dev/null
 
-      # -------- Artefacts & résumé --------
+      # Artefacts + résumé
       - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
