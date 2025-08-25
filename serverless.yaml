@@ -1,8 +1,6 @@
 service: cancer-prediction-api
 frameworkVersion: "4"
 
-plugins:
-  - serverless-plugin-aws-alerts   # alarmes CloudWatch prêtes à l’emploi
 
 provider:
   name: aws
