@@ -60,25 +60,42 @@ jobs:
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          serverless info --stage dev --region $AWS_REGION | tee sls-info.txt
+          serverless info --stage dev--region $AWS_REGION | tee sls-info.txt
           echo "-----"
           cat sls-info.txt
-
+          
       - name: Smoke test /health
         run: |
+          set -Eeuo pipefail
           sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
-          URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1)
-          echo "Health URL: $URL"
-          # retry simple (10 tentatives)
+
+          echo "---- serverless info (extrait) ----"
+          sed -n '1,200p' sls-info.txt || true
+          echo "-----------------------------------"
+
+          # 1) Essayer d'extraire une URL qui se termine par /health
+          URL=$(awk '/health/ {for(i=1;i<=NF;i++){ if ($i ~ /^https?:\/\//) {print $i; exit} }}' sls-info.txt || true)
+
+          # 2) Fallback : prendre la base et ajouter /health
+          if [ -z "${URL:-}" ]; then
+            BASE=$(grep -Eo 'https?://[^ ]*execute-api[^ ]*amazonaws\.com[^ ]*' sls-info.txt | head -n1 || true)
+            if [ -n "${BASE:-}" ]; then URL="${BASE%/}/health"; fi
+          fi
+
+          echo "Health URL: ${URL:-<vide>}"
+          test -n "${URL:-}" || { echo "::error::Impossible de trouver l’URL /health dans sls-info.txt"; exit 2; }
+
+          # Petit retry le temps que la Lambda se ‘réveille’
           for i in {1..10}; do
-            CODE=$(curl -s -o resp.json -w "%{http_code}" "$URL")
-            echo "HTTP $CODE"
-            cat resp.json || true
-            echo
-            jq -e '.ok == true' resp.json && exit 0
+            code=$(curl -s -o resp.json -w "%{http_code}" "$URL" || echo 000)
+            echo "HTTP $code"; cat resp.json || true; echo
+            if [ "$code" = "200" ] && jq -e '.ok == true' resp.json >/dev/null 2>&1; then
+              exit 0
+            fi
             sleep 4
           done
-          echo "Smoke test /health FAILED"
+
+          echo "::error::Smoke test /health FAILED"
           exit 1
 
       - name: Smoke test /predict
