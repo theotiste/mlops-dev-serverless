@@ -102,7 +102,8 @@ jobs:
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
 
-          URL="${{ steps.api.outputs.BASE_URL }}health"
+          BASE="${{ steps.api.outputs.BASE_URL }}"
+          URL="${BASE%/}/health"         # retire un éventuel slash final puis ajoute /health
           echo "Health URL: $URL"
 
           for i in {1..5}; do
@@ -124,8 +125,10 @@ jobs:
         if: ${{ hashFiles('features_input.json') != '' }}
         run: |
           set -euo pipefail
-          URL="${{ steps.api.outputs.BASE_URL }}predict"
+          BASE="${{ steps.api.outputs.BASE_URL }}"
+          URL="${BASE%/}/predict"
           echo "Predict URL: $URL"
+  
           echo "Body:"
           cat features_input.json
 
