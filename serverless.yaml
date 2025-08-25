@@ -1,46 +1,60 @@
 service: cancer-prediction-api
-frameworkVersion: '4'
+frameworkVersion: "4"
+
+plugins:
+  - serverless-plugin-aws-alerts   # alarmes CloudWatch prêtes à l’emploi
 
 provider:
   name: aws
   runtime: python3.12
   region: eu-west-3
   memorySize: 1024
-  timeout: 10
+  timeout: 15
   versionFunctions: true
+
+  # Observabilité
+  logRetentionInDays: 30
+  tracing:
+    lambda: true
+    apiGateway: true
+  logs:
+    httpApi: true                       # logs d’accès API Gateway (HTTP API v2)
+
   httpApi:
     cors:
       allowedOrigins: ["*"]
       allowedHeaders: ["Content-Type"]
       allowedMethods: ["GET", "POST", "OPTIONS"]
+
   environment:
-    S3_BUCKET: mlopstheotiste-bucket         # <-- à adapter
-    MODEL_KEY: models/RandomForest.pkl       # <-- à adapter
+    S3_BUCKET: mlopstheotiste-bucket       # <-- adapte si besoin
+    MODEL_KEY: models/RandomForest.pkl     # <-- adapte si besoin
+
   iam:
     role:
       statements:
+        # Lecture du modèle depuis S3
         - Effect: Allow
-          Action:
-            - s3:GetObject
+          Action: s3:GetObject
           Resource:
             - arn:aws:s3:::${self:provider.environment.S3_BUCKET}/${self:provider.environment.MODEL_KEY}
-            # (optionnel, utile si vous changez le nom du fichier)
             - arn:aws:s3:::${self:provider.environment.S3_BUCKET}/models/*
 
+        # (facultatif) X-Ray pour traces détaillées
+        - Effect: Allow
+          Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+          Resource: "*"
+
 package:
-  # on n’embarque que le code nécessaire
   patterns:
-    - '!**'                 # exclude everything
-    - handler.py            # include only the lambda handler
+    - "!**"              # exclure tout…
+    - handler.py         # …sauf le code Lambda
 
 functions:
   health:
     handler: handler.health
-    timeout: 15
-    layers:
-      # ARNs des layers déjà créés (numpy + scikit-learn)
-      - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
-      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11 
     events:
       - httpApi:
           path: /health
@@ -50,10 +64,38 @@ functions:
     handler: handler.predict
     timeout: 15
     layers:
-      # ARNs des layers déjà créés (numpy + scikit-learn)
+      # ARNs des layers (numpy + scikit-learn) – adapte si besoin
       - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
       - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11
     events:
       - httpApi:
           path: /predict
           method: POST
+
+custom:
+  # Tagging utile pour la visibilité des ressources
+  stage: ${opt:stage, 'dev'}
+  stackTags:
+    Service: ${self:service}
+    Stage: ${self:custom.stage}
+
+  # =========================
+  # Alarms (serverless-plugin-aws-alerts)
+  # =========================
+  alerts:
+    stages: [dev, prod]
+    topics:
+      alarm:
+        topic: ${self:service}-${sls:stage}-alarms
+        notifications:
+          # Remplace par ton email, Slack/SNS… (l’email devra être confirmé)
+          - protocol: email
+            endpoint: franck.theotiste@wanadoo.fr
+    alarms:
+      # Lambda
+      - functionErrors
+      - functionThrottles
+      - functionDuration
+      # API Gateway
+      - apiGateway5xxError
+      - apiGatewayLatency
