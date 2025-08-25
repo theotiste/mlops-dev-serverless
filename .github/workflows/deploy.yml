@@ -3,15 +3,7 @@ name: deploy-dev
 on:
   push:
     branches: [ main ]
-    paths:
-      - "**/*.py"
-      - "serverless.yaml"
-      - ".github/workflows/deploy.yml"
-  workflow_dispatch: {}
-
-permissions:
-  contents: read
-  id-token: write   # prêt pour OIDC si tu passes aux rôles IAM
+  workflow_dispatch:
 
 concurrency:
   group: deploy-dev
@@ -20,12 +12,13 @@ concurrency:
 env:
   AWS_REGION: eu-west-3
   STAGE: dev
-  STACK_NAME: cancer-prediction-api-dev
 
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,56 +27,59 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Install Serverless CLI
-        run: npm i -g serverless@4
+          cache: 'npm'
 
       - name: Setup Python (tools jq/curl seront installés plus bas si besoin)
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
-      # Garde l’auth AWS par clés pour l’instant (simple). OIDC en “Prochaines étapes”.
-      - name: Configure AWS credentials
+      - name: Install Serverless CLI
+        run: npm i -g serverless@^4
+
+      - name: Configure AWS credentials (dev)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Validate Serverless config
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: serverless print --stage $STAGE --region $AWS_REGION > /dev/null
 
-      - name: Deploy (dev)
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless deploy --stage $STAGE --region $AWS_REGION --conceal
+      - name: Deploy (${{ env.STAGE }})
+        run: serverless deploy --stage $STAGE --region $AWS_REGION --verbose
 
       - name: Fetch API base URL from CloudFormation
-        id: api
+        id: url
         run: |
-          URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+          URL=$(aws cloudformation describe-stacks \
+            --stack-name "cancer-prediction-api-${{ env.STAGE }}" \
             --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'].OutputValue" \
             --output text)
-          # sécurité : on enlève un éventuel trailing slash
-          URL=${URL%/}
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "BASE_URL=${URL%/}" >> $GITHUB_OUTPUT
 
       - name: Smoke test /health
         run: |
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
-          URL="${{ steps.api.outputs.url }}/health"
+          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq curl >/dev/null
+          URL="${{ steps.url.outputs.BASE_URL }}/health"
           echo "Health URL: $URL"
           test -n "$URL"
-          curl -fsS "$URL" | jq -e '.ok == true' > /dev/null
+          curl -fsS "$URL" | jq -e '.ok == true'
+
+      - name: Smoke test /predict
+        run: |
+          URL="${{ steps.url.outputs.BASE_URL }}/predict"
+          BODY='{"features":[17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189]}'
+          curl -fsS -H "Content-Type: application/json" -d "$BODY" "$URL" | jq -e '.predictions|length==1'
 
       - name: Show endpoints (optional) and save
-        run: serverless info --verbose --stage $STAGE --region $AWS_REGION | tee sls-info.txt
+        run: |
+          echo "GET  ${{ steps.url.outputs.BASE_URL }}/health"  | tee sls-info.txt
+          echo "POST ${{ steps.url.outputs.BASE_URL }}/predict" | tee -a sls-info.txt
 
-      - name: Upload sls info
+      - name: Upload sls info (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: sls-info
