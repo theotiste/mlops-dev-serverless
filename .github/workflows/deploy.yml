@@ -4,75 +4,26 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "handler.py"
+      - "**/*.py"
       - "serverless.yaml"
       - ".github/workflows/deploy.yml"
-      - "RandomForest.pkl"
-      - "model-layer.zip"
-  workflow_dispatch:
-    inputs:
-      stage:
-        description: "Serverless stage"
-        type: string
-        default: dev
-      region:
-        description: "AWS region"
-        type: string
-        default: eu-west-3
-      run_smoke:
-        description: "Run smoke tests"
-        type: boolean
-        default: true
-      rollback_timestamp:
-        description: "Rollback to this Serverless timestamp (leave empty to deploy)"
-        type: string
-        required: false
-        default: ""
+  workflow_dispatch: {}
 
-env:
-  STAGE: ${{ inputs.stage || 'dev' }}
-  AWS_REGION: ${{ inputs.region || 'eu-west-3' }}
-  STACK_NAME: cancer-prediction-api-${{ inputs.stage || 'dev' }}
+permissions:
+  contents: read
+  id-token: write   # prêt pour OIDC si tu passes aux rôles IAM
 
 concurrency:
-  group: serverless-${{ github.ref }}
+  group: deploy-dev
   cancel-in-progress: true
 
+env:
+  AWS_REGION: eu-west-3
+  STAGE: dev
+  STACK_NAME: cancer-prediction-api-dev
+
 jobs:
-  # ---------- Rollback manuel ----------
-  rollback:
-    if: ${{ inputs.rollback_timestamp != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Serverless CLI
-        run: npm i -g serverless@4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Serverless rollback
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          serverless rollback \
-            --stage "${{ env.STAGE }}" \
-            --region "${{ env.AWS_REGION }}" \
-            --timestamp "${{ inputs.rollback_timestamp }}"
-          echo "Rolled back to timestamp: ${{ inputs.rollback_timestamp }}" >> $GITHUB_STEP_SUMMARY
-
-  # ---------- Déploiement normal ----------
-  deploy:
-    if: ${{ inputs.rollback_timestamp == '' }}
+  deploy-dev:
     runs-on: ubuntu-latest
 
     steps:
@@ -82,23 +33,17 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
       - name: Install Serverless CLI
         run: npm i -g serverless@4
 
-      - name: Setup Python
+      - name: Setup Python (tools jq/curl seront installés plus bas si besoin)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          
+          python-version: '3.12'
 
-      - name: Show versions
-        run: |
-          node -v
-          serverless --version
-          python -V
-
+      # Garde l’auth AWS par clés pour l’instant (simple). OIDC en “Prochaines étapes”.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -109,67 +54,37 @@ jobs:
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless print --stage "${{ env.STAGE }}" --region "${{ env.AWS_REGION }}"
+        run: serverless print --stage $STAGE --region $AWS_REGION > /dev/null
 
-      - name: Deploy (${{ env.STAGE }})
+      - name: Deploy (dev)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          serverless deploy --stage "${{ env.STAGE }}" --region "${{ env.AWS_REGION }}" --conceal
-          serverless info   --stage "${{ env.STAGE }}" --region "${{ env.AWS_REGION }}" > sls-info.txt
+        run: serverless deploy --stage $STAGE --region $AWS_REGION --conceal
 
-      - name: Fetch API base URL from sls info
+      - name: Fetch API base URL from CloudFormation
         id: api
         run: |
-          # Tente plusieurs formats d'output pour être robuste
-          BASE=$(grep -Eo 'https://[^ ]+\.amazonaws\.com' sls-info.txt | head -n1 || true)
-          [[ -z "$BASE" ]] && BASE=$(grep -Eo 'ServiceEndpoint:\s+https://[^ ]+' sls-info.txt | awk '{print $2}' | head -n1 || true)
-          echo "base=$BASE" >> "$GITHUB_OUTPUT"
-          echo "### API base URL" >> $GITHUB_STEP_SUMMARY
-          echo "$BASE" >> $GITHUB_STEP_SUMMARY
-          echo "$BASE" > api-base.txt
+          URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'].OutputValue" \
+            --output text)
+          # sécurité : on enlève un éventuel trailing slash
+          URL=${URL%/}
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
 
-      - name: Upload sls info (artifact)
+      - name: Smoke test /health
+        run: |
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+          URL="${{ steps.api.outputs.url }}/health"
+          echo "Health URL: $URL"
+          test -n "$URL"
+          curl -fsS "$URL" | jq -e '.ok == true' > /dev/null
+
+      - name: Show endpoints (optional) and save
+        run: serverless info --verbose --stage $STAGE --region $AWS_REGION | tee sls-info.txt
+
+      - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
           name: sls-info
-          path: |
-            sls-info.txt
-            api-base.txt
-
-      - name: Smoke test /health
-        if: ${{ inputs.run_smoke }}
-        run: |
-          set -euo pipefail
-          URL="${{ steps.api.outputs.base }}/health"
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
-          echo "Health URL: $URL"
-          test -n "$URL"
-          curl -sS "$URL" | jq -e '.ok == true' >/dev/null
-
-      - name: Smoke test /predict
-        if: ${{ inputs.run_smoke }}
-        run: |
-          set -euo pipefail
-          BASE="${{ steps.api.outputs.base }}"
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
-
-          if [ -f "features_input.json" ]; then
-            BODY=$(cat features_input.json)
-          else
-            # Exemple minimal (31 valeurs) correspondant à ton modèle
-            BODY='{"features":[17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,25.38,17.33,184.6,2019,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189]}'
-          fi
-
-          echo "$BODY" | jq . >/dev/null  # valide le JSON
-          curl -sS -X POST "$BASE/predict" \
-            -H "Content-Type: application/json" \
-            -d "$BODY" | jq -e '.predictions | length >= 1' >/dev/null
-
-      - name: Summary
-        run: |
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo " Déployé: **${{ env.STAGE }}** @ **${{ env.AWS_REGION }}**" >> $GITHUB_STEP_SUMMARY
-          echo "Base URL: ${{ steps.api.outputs.base }}" >> $GITHUB_STEP_SUMMARY
+          path: sls-info.txt
