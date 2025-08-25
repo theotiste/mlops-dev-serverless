@@ -70,30 +70,61 @@ functions:
           path: /predict
           method: POST
 
-custom:
-  # Tagging utile pour la visibilité des ressources
-  stage: ${opt:stage, 'dev'}
-  stackTags:
-    Service: ${self:service}
-    Stage: ${self:custom.stage}
 
-  # =========================
-  # Alarms (serverless-plugin-aws-alerts)
-  # =========================
+ # serverless.yml – extrait monitoring correctif (HTTP API)
+custom:
   alerts:
-    stages: [dev, prod]
+    dashboards: true
+
     topics:
       alarm:
-        topic: ${self:service}-${sls:stage}-alarms
+        topic: ${self:service}-${sls:stage}-alerts
         notifications:
-          # Remplace par ton email, Slack/SNS… (l’email devra être confirmé)
           - protocol: email
-            endpoint: franck.theotiste@wanadoo.fr
+            endpoint: ${env:ALERT_EMAIL, 'change-me@example.com'}
+
+    definitions:
+      lambdaErrors:
+        namespace: AWS/Lambda
+        metric: Errors
+        threshold: 1
+        statistic: Sum
+        period: 60
+        evaluationPeriods: 1
+        comparisonOperator: GreaterThanOrEqualToThreshold
+        treatMissingData: notBreaching
+
+      lambdaThrottles:
+        namespace: AWS/Lambda
+        metric: Throttles
+        threshold: 1
+        statistic: Sum
+        period: 60
+        evaluationPeriods: 1
+        comparisonOperator: GreaterThanOrEqualToThreshold
+        treatMissingData: notBreaching
+
+      apiGateway5xx:                 # <-- NOM DE LA DÉFINITION (libre)
+        namespace: AWS/ApiGateway
+        metric: 5XXError
+        threshold: 1
+        statistic: Sum
+        period: 60
+        evaluationPeriods: 1
+        comparisonOperator: GreaterThanOrEqualToThreshold
+        treatMissingData: notBreaching
+        # Dimensions pour **HTTP API** (v2)
+        dimensions:
+          - Name: ApiId
+            Value:
+              Ref: HttpApi          # référence CloudFormation du HttpApi créé par Serverless
+          - Name: Stage
+            Value: ${sls:stage}
+
+    # On demande explicitement ces alarmes
     alarms:
-      # Lambda
-      - functionErrors
-      - functionThrottles
-      - functionDuration
-      # API Gateway
-      - apiGateway5xxError
-      - apiGatewayLatency
+      - lambdaErrors
+      - lambdaThrottles
+      - apiGateway5xx              # <-- on appelle la définition ci-dessus
+         
+
