@@ -91,7 +91,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
+          
 
       - name: Show versions
         run: |
@@ -171,5 +171,5 @@ jobs:
       - name: Summary
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🚀 Déployé: **${{ env.STAGE }}** @ **${{ env.AWS_REGION }}**" >> $GITHUB_STEP_SUMMARY
+          echo " Déployé: **${{ env.STAGE }}** @ **${{ env.AWS_REGION }}**" >> $GITHUB_STEP_SUMMARY
           echo "Base URL: ${{ steps.api.outputs.base }}" >> $GITHUB_STEP_SUMMARY
