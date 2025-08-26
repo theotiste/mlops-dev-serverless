@@ -113,21 +113,59 @@ jobs:
       # Smoke /health
       - name: Smoke test /health
         shell: bash
+        env:
+        STAGE: dev
         run: |
           set -euo pipefail
-          URL=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1)
-          echo "Health URL: $URL"
-          test -n "$URL"
 
-          for i in {1..5}; do
-            echo "Try ${i}/5 ..."
-            if curl -fsS "$URL" | jq -e '.ok == true' >/dev/null; then
-              echo "Health OK ✅"
-              exit 0
-            fi
-            sleep $((i*3))
-          done
-          echo "Health check failed ❌"; exit 1
+          # jq au cas où l'image runner ne l'aurait pas
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq jq >/dev/null 2>&1 || true
+
+          # 1) Récupère la base URL depuis le fichier sls-info.txt produit juste avant
+          BASE_URL=$(tr -d '\r' < sls-info.txt | grep -Eo 'https://[^ ]+' | head -1)
+          if [ -z "${BASE_URL:-}" ]; then
+           echo "❌ Impossible de déterminer la base URL depuis sls-info.txt"
+           echo "Contenu sls-info.txt:"
+           cat sls-info.txt || true
+           exit 1
+          fi
+
+          # 2) Construit proprement l'URL /health (un seul slash)
+          HEALTH_URL="${BASE_URL%/}/health"
+          echo "Health URL: $HEALTH_URL"
+
+          ok=false
+          for i in 1 2 3 4 5; do
+          echo "Try $i/5 …"
+          status=0
+          # on récupère le corps pour que jq puisse le lire (pas de -f qui masque les corps d'erreur)
+          body=$(curl -sS -m 10 "$HEALTH_URL" || status=$?)
+          if [ $status -eq 0 ] && echo "$body" | jq -e '.ok == true' >/dev/null 2>&1; then
+            echo "Health OK ✅"
+            ok=true
+            break
+          fi
+
+          echo "::group::Réponse HTTP (essai $i)"
+          # Affiche headers + corps pour aider au debug
+          curl -i -s -m 10 "$HEALTH_URL" || true
+          echo
+          echo "Corps brut reçu:"
+          echo "$body" | sed -e 's/^/| /'
+          echo "::endgroup::"
+          sleep $((i*3))
+        done
+
+        if [ "$ok" != "true" ]; then
+          echo "❌ Health check failed"
+          echo "::group::Derniers logs CloudWatch de la fonction health"
+          # Nécessite que le CLI Serverless soit déjà installé plus haut dans le workflow
+          serverless logs -f health -s "$STAGE" -r "$AWS_REGION" --startTime 10m || true
+          echo "::endgroup::"
+          exit 1
+        fi
+ 
 
       # Smoke /predict (optionnel)
       - name: Smoke test /predict (optional)
