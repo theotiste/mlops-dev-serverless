@@ -42,15 +42,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node (no cache)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: |
-            package-lock.json
-            npm-shrinkwrap.json
-            yarn.lock
 
       - name: Install Serverless CLI
         run: npm i -g serverless@^4
@@ -86,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
-          echo "serverless.yml OK"
+          echo "serverless.* OK"
 
       - name: Deploy
         env:
@@ -131,16 +126,9 @@ jobs:
             echo "::endgroup::"
 
             if [ "$code" = "200" ]; then
-              # Si ton /health renvoie du JSON, on peut valider .ok==true :
-              if jq -e '.ok == true' /tmp/body.txt >/dev/null 2>&1; then
-                echo "Health OK ✅"
-                ok=true
-                break
-              fi
-              # Sinon, considère 200 comme suffisant :
-              echo "Health OK (HTTP 200) ✅"
-              ok=true
-              break
+              # Si /health renvoie du JSON {"ok":true}, on le valide, sinon 200 suffit.
+              jq -e '.ok == true' /tmp/body.txt >/dev/null 2>&1 && echo "Health OK ✅" && ok=true && break
+              echo "Health OK (HTTP 200) ✅"; ok=true; break
             fi
             sleep $((i*3))
           done
