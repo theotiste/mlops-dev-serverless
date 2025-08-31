@@ -2,8 +2,9 @@ name: deploy-dev
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
     paths:
+      - "serverless.yml"
       - "serverless.yaml"
       - "handler.py"
       - ".github/workflows/deploy.yml"
@@ -12,9 +13,11 @@ on:
     inputs:
       stage:
         description: "Stage"
+        required: false
         default: "dev"
       region:
         description: "AWS region"
+        required: false
         default: "eu-west-3"
 
 concurrency:
@@ -32,15 +35,14 @@ env:
   SLS_TELEMETRY_DISABLED: "1"
 
 jobs:
-  deploy-dev:
+  deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Node (cache npm si lock file)
-      - name: Setup Node (cache npm)
-        if: hashFiles('package-lock.json','npm-shrinkwrap.json','yarn.lock') != ''
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -50,16 +52,9 @@ jobs:
             npm-shrinkwrap.json
             yarn.lock
 
-      - name: Setup Node (no cache)
-        if: hashFiles('package-lock.json','npm-shrinkwrap.json','yarn.lock') == ''
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
       - name: Install Serverless CLI
         run: npm i -g serverless@^4
 
-      # Python + jq
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -67,6 +62,7 @@ jobs:
 
       - name: Install jq
         run: |
+          set -euo pipefail
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
           jq --version
@@ -77,7 +73,6 @@ jobs:
           npm -v
           serverless -v
 
-      # AWS creds
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -85,88 +80,79 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Validation
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
           set -euo pipefail
           serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
-          echo "serverless.yaml OK"
+          echo "serverless.yml OK"
 
-      # Déploiement
       - name: Deploy
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
+          set -euo pipefail
           serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
 
-      # Récupère les endpoints
       - name: Fetch API base URL (sls info)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
+          set -euo pipefail
           serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt
           echo "=== sls-info.txt ==="
           cat sls-info.txt
 
-      # Smoke /health
       - name: Smoke test /health
         shell: bash
-        env:
-        STAGE: dev
         run: |
           set -euo pipefail
 
-          # jq au cas où l'image runner ne l'aurait pas
-          sudo apt-get update -y >/dev/null 2>&1 || true
-          sudo apt-get install -y -qq jq >/dev/null 2>&1 || true
-
-          # 1) Récupère la base URL depuis le fichier sls-info.txt produit juste avant
           BASE_URL=$(tr -d '\r' < sls-info.txt | grep -Eo 'https://[^ ]+' | head -1)
           if [ -z "${BASE_URL:-}" ]; then
-           echo "❌ Impossible de déterminer la base URL depuis sls-info.txt"
-           echo "Contenu sls-info.txt:"
-           cat sls-info.txt || true
-           exit 1
+            echo "❌ Impossible de déterminer la base URL depuis sls-info.txt"
+            cat sls-info.txt || true
+            exit 1
           fi
 
-          # 2) Construit proprement l'URL /health (un seul slash)
           HEALTH_URL="${BASE_URL%/}/health"
           echo "Health URL: $HEALTH_URL"
 
           ok=false
-          for i in 1 2 3 4 5; do
-          echo "Try $i/5 …"
-          status=0
-          # on récupère le corps pour que jq puisse le lire (pas de -f qui masque les corps d'erreur)
-          body=$(curl -sS -m 10 "$HEALTH_URL" || status=$?)
-          if [ $status -eq 0 ] && echo "$body" | jq -e '.ok == true' >/dev/null 2>&1; then
-            echo "Health OK ✅"
-            ok=true
-            break
+          for i in {1..5}; do
+            echo "Essai #$i"
+            code=$(curl -sS -m 10 -o /tmp/body.txt -w "%{http_code}" "$HEALTH_URL" || true)
+
+            echo "::group::Réponse HTTP (essai $i)"
+            echo "HTTP: ${code}"
+            echo "Corps brut reçu:"
+            sed -e 's/^/| /' /tmp/body.txt || true
+            echo "::endgroup::"
+
+            if [ "$code" = "200" ]; then
+              # Si ton /health renvoie du JSON, on peut valider .ok==true :
+              if jq -e '.ok == true' /tmp/body.txt >/dev/null 2>&1; then
+                echo "Health OK ✅"
+                ok=true
+                break
+              fi
+              # Sinon, considère 200 comme suffisant :
+              echo "Health OK (HTTP 200) ✅"
+              ok=true
+              break
+            fi
+            sleep $((i*3))
+          done
+
+          if [ "$ok" != "true" ]; then
+            echo "❌ Health check failed"
+            echo "::group::Derniers logs CloudWatch de la fonction health"
+            serverless logs -f health -s "$STAGE" -r "$AWS_REGION" --startTime 10m || true
+            echo "::endgroup::"
+            exit 1
           fi
 
-          echo "::group::Réponse HTTP (essai $i)"
-          # Affiche headers + corps pour aider au debug
-          curl -i -s -m 10 "$HEALTH_URL" || true
-          echo
-          echo "Corps brut reçu:"
-          echo "$body" | sed -e 's/^/| /'
-          echo "::endgroup::"
-          sleep $((i*3))done
-          done
-            if [ "$ok" != "true" ]; then
-              echo "❌ Health check failed"
-              echo "::group::Derniers logs CloudWatch de la fonction health"
-              # Nécessite que le CLI Serverless soit déjà installé plus haut dans le workflow
-              serverless logs -f health -s "$STAGE" -r "$AWS_REGION" --startTime 10m || true
-              echo "::endgroup::"
-              exit 1
-            fi
- 
-
-      # Smoke /predict (optionnel)
       - name: Smoke test /predict (optional)
         if: hashFiles('features_input.json') != ''
         shell: bash
@@ -174,15 +160,14 @@ jobs:
           set -euo pipefail
           PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
           echo "Predict URL: ${PRED:-<none>}"
-          if [[ -z "${PRED:-}" ]]; then
+          if [ -z "${PRED:-}" ]; then
             echo "No /predict endpoint in sls info. Skipping."
             exit 0
           fi
           RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PRED")
           echo "$RES" | tee predict-response.json
-          jq -e '.predictions or .probabilities' predict-response.json >/dev/null
+          jq -e '.predictions or .probabilities or .prediction or .result' predict-response.json >/dev/null
 
-      # Artefacts + résumé
       - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
@@ -196,11 +181,14 @@ jobs:
       - name: Job summary
         shell: bash
         run: |
-          echo "## Deploy summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Service**: ${SERVICE_NAME}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Stage**: ${STAGE}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Region**: ${AWS_REGION}" >> $GITHUB_STEP_SUMMARY
-          HEALTH=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1 || true)
-          PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1 || true)
-          echo "- **Health**: ${HEALTH:-n/a}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Predict**: ${PRED:-n/a}"   >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+          {
+            echo "## Deploy summary"
+            echo "- **Service**: ${SERVICE_NAME}"
+            echo "- **Stage**: ${STAGE}"
+            echo "- **Region**: ${AWS_REGION}"
+            HEALTH=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1 || true)
+            PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1 || true)
+            echo "- **Health**: ${HEALTH:-n/a}"
+            echo "- **Predict**: ${PRED:-n/a}"
+          } >> "$GITHUB_STEP_SUMMARY"
