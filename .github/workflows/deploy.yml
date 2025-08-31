@@ -154,17 +154,16 @@ jobs:
           echo "Corps brut reçu:"
           echo "$body" | sed -e 's/^/| /'
           echo "::endgroup::"
-          sleep $((i*3))
-        done
-
-        if [ "$ok" != "true" ]; then
-          echo "❌ Health check failed"
-          echo "::group::Derniers logs CloudWatch de la fonction health"
-          # Nécessite que le CLI Serverless soit déjà installé plus haut dans le workflow
-          serverless logs -f health -s "$STAGE" -r "$AWS_REGION" --startTime 10m || true
-          echo "::endgroup::"
-          exit 1
-        fi
+          sleep $((i*3))done
+          done
+            if [ "$ok" != "true" ]; then
+              echo "❌ Health check failed"
+              echo "::group::Derniers logs CloudWatch de la fonction health"
+              # Nécessite que le CLI Serverless soit déjà installé plus haut dans le workflow
+              serverless logs -f health -s "$STAGE" -r "$AWS_REGION" --startTime 10m || true
+              echo "::endgroup::"
+              exit 1
+            fi
  
 
       # Smoke /predict (optionnel)
