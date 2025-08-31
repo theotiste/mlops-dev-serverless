@@ -7,8 +7,8 @@ on:
       - "serverless.yml"
       - "serverless.yaml"
       - "handler.py"
-      - ".github/workflows/deploy.yml"
       - "features_input.json"
+      - ".github/workflows/deploy.yml"
   workflow_dispatch:
     inputs:
       stage:
@@ -68,6 +68,7 @@ jobs:
           npm -v
           serverless -v
 
+      # ⛅️ AWS credentials (utilise tes clés longues durée en secrets)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -95,67 +96,112 @@ jobs:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt
+          serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt || true
           echo "=== sls-info.txt ==="
-          cat sls-info.txt
-          
-      - name: Smoke test /health
+          cat sls-info.txt || true
+
+      # 🔎 Résolution robuste des endpoints
+      - name: Resolve endpoints (health & predict)
+        id: resolve
         shell: bash
+        env:
+          HEALTH_URL_SECRET: ${{ secrets.HEALTH_URL }}   # ex: https://api.mlopstheotiste.fr/health (optionnel mais recommandé)
         run: |
           set -euo pipefail
 
-          # 1) Tente d'extraire directement une URL /health depuis sls-info.txt
-          HEALTH_URL=$(grep -Eo 'https://[^ ]+/health' sls-info.txt | head -1 || true)
+          echo "::group::sls-info.txt"
+          cat sls-info.txt || true
+          echo "::endgroup::"
 
-          # 2) Sinon, construit à partir de la 1ère URL trouvée, sans doubler /health
-          if [ -z "${HEALTH_URL:-}" ]; then
-          BASE_URL=$(grep -Eo 'https://[^ ]+' sls-info.txt | head -1 || true)
-          if [ -z "${BASE_URL:-}" ]; then
-           echo "❌ Aucune URL trouvée dans sls-info.txt"
-           echo "=== sls-info.txt ==="; cat sls-info.txt || true
-          exit 1
-          fi
-          BASE_URL="${BASE_URL%/}"
-          case "$BASE_URL" in
-          */health) HEALTH_URL="$BASE_URL" ;;
-          *)        HEALTH_URL="${BASE_URL}/health" ;;
-          esac
+          BASE_URL=""
+          HEALTH_URL=""
+
+          # 1) Secret direct (si fourni)
+          if [ -n "${HEALTH_URL_SECRET:-}" ]; then
+            HEALTH_URL="$HEALTH_URL_SECRET"
+            BASE_URL="${HEALTH_URL%/health}"
           fi
 
+          # 2) sls-info: URL /health explicite
+          if [ -z "${HEALTH_URL}" ]; then
+            url=$(grep -Eo 'https://[^ ]+/health' sls-info.txt | head -1 || true)
+            if [ -n "${url}" ]; then
+              HEALTH_URL="$url"
+              BASE_URL="${HEALTH_URL%/health}"
+            fi
+          fi
+
+          # 3) sls-info: 1ère URL générique
+          if [ -z "${BASE_URL}" ]; then
+            base=$(grep -Eo 'https://[^ ]+' sls-info.txt | head -1 || true)
+            if [ -n "${base}" ]; then
+              BASE_URL="${base%/}"
+            fi
+          fi
+
+          # 4) CloudFormation Outputs (ServiceEndpoint / HttpApiUrl)
+          if [ -z "${BASE_URL}" ]; then
+            STACK="${SERVICE_NAME}-${STAGE}"
+            outs=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK" --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[].OutputValue" --output text 2>/dev/null || true)
+            if [ -n "${outs}" ]; then
+              BASE_URL=$(printf "%s\n" $outs | grep -E 'https://.*execute-api\..*amazonaws.com' | head -1 || true)
+              BASE_URL="${BASE_URL%/}"
+            fi
+          fi
+
+          # 5) Compose HEALTH_URL si besoin
+          if [ -z "${HEALTH_URL}" ] && [ -n "${BASE_URL}" ]; then
+            case "$BASE_URL" in
+              */health) HEALTH_URL="$BASE_URL" ;;
+              *)        HEALTH_URL="${BASE_URL}/health" ;;
+            esac
+          fi
+
+          if [ -z "${HEALTH_URL}" ] || [ -z "${BASE_URL}" ]; then
+            echo "❌ Aucune URL d'API trouvée. Définis le secret HEALTH_URL (ex: https://ton-api/health) ou expose ServiceEndpoint dans les Outputs CFN."
+            exit 1
+          fi
+
+          echo "BASE_URL_RESOLVED=$BASE_URL"     | tee -a "$GITHUB_ENV"
+          echo "HEALTH_URL_RESOLVED=$HEALTH_URL" | tee -a "$GITHUB_ENV"
+          echo "Resolved BASE_URL=$BASE_URL"
+          echo "Resolved HEALTH_URL=$HEALTH_URL"
+
+      - name: Smoke test /health (resolved)
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEALTH_URL="${HEALTH_URL_RESOLVED:?missing}"
           echo "Health URL: $HEALTH_URL"
 
           ok=false
           for i in {1..6}; do
-          code=$(curl -sS -m 10 -o /tmp/body.txt -w "%{http_code}" "$HEALTH_URL" || true)
-
-          echo "::group::Attempt $i - HTTP ${code}"
-          sed -e 's/^/| /' /tmp/body.txt || true
-          echo "::endgroup::"
-
-          if [ "$code" = "200" ] || [ "$code" = "204" ]; then
-           ok=true
-           break
-          fi
-          sleep $((i*5))
+            code=$(curl -sS -m 12 -o /tmp/body.txt -w "%{http_code}" "$HEALTH_URL" || true)
+            echo "::group::Attempt $i - HTTP ${code}"
+            sed -e 's/^/| /' /tmp/body.txt || true
+            echo "::endgroup::"
+            if [ "$code" = "200" ] || [ "$code" = "204" ]; then ok=true; break; fi
+            sleep $((i*5))
           done
 
           if [ "$ok" != "true" ]; then
-           echo "❌ Healthcheck failed on $HEALTH_URL"
-          exit 1
+            echo "❌ Healthcheck failed on $HEALTH_URL"
+            echo "::group::Derniers logs CloudWatch (health)"
+            serverless logs -f health -s "$STAGE" -r "$AWS_REGION" --startTime 10m || true
+            echo "::endgroup::"
+            exit 1
           fi
- 
-     
+
       - name: Smoke test /predict (optional)
-        if: hashFiles('features_input.json') != ''
+        if: ${{ hashFiles('features_input.json') != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1)
-          echo "Predict URL: ${PRED:-<none>}"
-          if [ -z "${PRED:-}" ]; then
-            echo "No /predict endpoint in sls info. Skipping."
-            exit 0
-          fi
+          BASE="${BASE_URL_RESOLVED:?missing}"
+          PRED="${BASE%/}/predict"
+          echo "Predict URL: ${PRED}"
           RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PRED")
           echo "$RES" | tee predict-response.json
           jq -e '.predictions or .probabilities or .prediction or .result' predict-response.json >/dev/null
@@ -179,8 +225,7 @@ jobs:
             echo "- **Service**: ${SERVICE_NAME}"
             echo "- **Stage**: ${STAGE}"
             echo "- **Region**: ${AWS_REGION}"
-            HEALTH=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -n1 || true)
-            PRED=$(grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -n1 || true)
-            echo "- **Health**: ${HEALTH:-n/a}"
-            echo "- **Predict**: ${PRED:-n/a}"
+            echo "- **BASE URL**: ${BASE_URL_RESOLVED}"
+            echo "- **Health**: ${HEALTH_URL_RESOLVED}"
+            [ -f predict-response.json ] && echo "- **Predict sample**: $(jq -c '.' predict-response.json)" || true
           } >> "$GITHUB_STEP_SUMMARY"
