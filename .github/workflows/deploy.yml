@@ -101,8 +101,6 @@ jobs:
             exit 1
           }
           echo "::endgroup::"
-Pourquoi ça règle le souci 
-          
         
 
       - name: Deploy
