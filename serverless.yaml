@@ -49,31 +49,28 @@ package:
   patterns:
     - "!**"              # exclure tout…
     - handler.py         # …sauf le code Lambda
-
+    
 functions:
-  health:
-    handler: handler.health
-    timeout: 15
-    layers:
-      # ARNs des layers (numpy + scikit-learn) – adapte si besoin
-      - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
-      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11
-    events:
-      - httpApi:
-          path: /health
-          method: GET
-
   predict:
     handler: handler.predict
-    timeout: 15
-    layers:
-      # ARNs des layers (numpy + scikit-learn) – adapte si besoin
-      - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
-      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11
     events:
-      - httpApi:
-          path: /predict
-          method: POST
+      - http:
+          path: predict
+          method: post
+          cors:
+            origins:
+              - https://main.d1s8fkj9in84k5.amplifyapp.com
+              - https://form.mlopstheotiste.fr
+            headers:
+              - Content-Type
+            allowCredentials: false
+  health:
+    handler: handler.health
+    events:
+      - http:
+          path: health
+          method: get
+          cors: true
 
 
  # serverless.yml – extrait monitoring correctif (HTTP API)
