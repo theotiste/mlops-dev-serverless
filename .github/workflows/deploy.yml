@@ -1,133 +1,160 @@
-service: cancer-prediction-api
-frameworkVersion: ">=3 <5"
-configValidationMode: error
+name: deploy-dev
 
-provider:
-  name: aws
-  runtime: python3.12
-  region: ${opt:region, 'eu-west-3'}
-  stage: ${opt:stage, 'dev'}
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "serverless.yml"
+      - "serverless.yaml"
+      - "handler.py"
+      - "features_input.json"
+      - "form_validated.html"
+      - "result.html"
+      - "index.html"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Stage"
+        default: "dev"
+      region:
+        description: "AWS region"
+        default: "eu-west-3"
 
-  # Ressources Lambda
-  memorySize: 512
-  timeout: 15
-  logRetentionInDays: 14
-  tracing:
-    lambda: true
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
 
-  # Variables d'env dispo dans la Lambda
-  environment:
-    STAGE: ${sls:stage}
+permissions:
+  id-token: write
+  contents: read
 
-  # API Gateway (REST)
-  apiGateway:
-    minimumCompressionSize: 1024
-  logs:
-    restApi:
-      accessLogging: true
-      executionLogging: true
-      level: INFO
-      fullExecutionData: false
+env:
+  STAGE: ${{ github.event.inputs.stage || 'dev' }}
+  AWS_REGION: ${{ github.event.inputs.region || 'eu-west-3' }}
+  SERVICE_NAME: cancer-prediction-api
+  SLS_TELEMETRY_DISABLED: "1"
+  FRONTEND_API_URL: ${{ secrets.FRONTEND_API_URL }}
+  HEALTH_URL: ${{ secrets.HEALTH_URL }}
 
-  # Bucket de déploiement Serverless
-  deploymentBucket:
-    blockPublicAccess: true
-    serverSideEncryption: AES256
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  # Tags utiles
-  tags:
-    Project: mlops-breast-cancer
-    Service: cancer-prediction-api
-    Stage: ${sls:stage}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-# Packaging: uniquement ce qui est nécessaire
-package:
-  patterns:
-    - "!node_modules/**"
-    - "!venv/**"
-    - "!tests/**"
-    - "handler.py"
-    - "model/**"
+      - name: Install Serverless CLI
+        run: npm i -g serverless@^4
 
-# CORS autorisés (ajoutez votre URL Amplify via la var d'env AMPLIFY_URL si besoin)
-custom:
-  allowedOrigins:
-    - https://form.mlopstheotiste.fr
-    - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-functions:
-  predict:
-    handler: handler.predict
-    timeout: 20
-    events:
-      - http:
-          path: predict
-          method: post
-          cors:
-            origins: ${self:custom.allowedOrigins}
-            headers:
-              - Content-Type
-            allowCredentials: false
-          # Validation côté API Gateway: exige {"features":[30 nombres]}
-          request:
-            schemas:
-              application/json:
-                name: PredictRequest
-                schema:
-                  type: object
-                  required:
-                    - features
-                  properties:
-                    features:
-                      type: array
-                      minItems: 30
-                      maxItems: 30
-                      items:
-                        type: number
+      - name: Install jq
+        run: |
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+          jq --version
 
-  health:
-    handler: handler.health
-    events:
-      - http:
-          path: health
-          method: get
-          cors: true
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-# Sorties CloudFormation: pratiques pour les pipelines (URLs)
-resources:
-  Outputs:
-    ServiceEndpoint:
-      Description: REST API base URL
-      Value:
-        Fn::Join:
-          - ""
-          - - "https://"
-            - Ref: ApiGatewayRestApi
-            - ".execute-api."
-            - Ref: AWS::Region
-            - ".amazonaws.com/"
-            - ${sls:stage}
-    HealthUrl:
-      Description: Healthcheck URL
-      Value:
-        Fn::Join:
-          - ""
-          - - "https://"
-            - Ref: ApiGatewayRestApi
-            - ".execute-api."
-            - Ref: AWS::Region
-            - ".amazonaws.com/"
-            - ${sls:stage}
-            - "/health"
-    PredictUrl:
-      Description: Predict URL
-      Value:
-        Fn::Join:
-          - ""
-          - - "https://"
-            - Ref: ApiGatewayRestApi
-            - ".execute-api."
-            - Ref: AWS::Region
-            - ".amazonaws.com/"
-            - ${sls:stage}
-            - "/predict"
+      - name: Validate Serverless config
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
+
+      - name: Deploy
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
+
+      - name: Fetch API base URL (sls info)
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: |
+          serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt || true
+          cat sls-info.txt || true
+
+      - name: Resolve endpoints (health & predict)
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_URL=""
+          HEALTH="${HEALTH_URL:-}"
+
+          if [ -z "${HEALTH}" ]; then
+            url=$(grep -Eo 'https://[^ ]+/health' sls-info.txt | head -1 || true)
+            if [ -n "${url}" ]; then HEALTH="$url"; fi
+          fi
+
+          if [ -z "${BASE_URL}" ]; then
+            base=$(grep -Eo 'https://[^ ]+' sls-info.txt | head -1 || true)
+            if [ -n "${base}" ]; then BASE_URL="${base%/}"; fi
+          fi
+
+          if [ -z "${BASE_URL}" ]; then
+            STACK="${SERVICE_NAME}-${STAGE}"
+            outs=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK" --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[].OutputValue" --output text 2>/dev/null || true)
+            if [ -n "${outs}" ]; then
+              BASE_URL=$(printf "%s\n" $outs | grep -E 'https://.*execute-api\..*amazonaws.com' | head -1 || true)
+              BASE_URL="${BASE_URL%/}"
+            fi
+          fi
+
+          if [ -z "${HEALTH}" ] && [ -n "${BASE_URL}" ]; then
+            case "$BASE_URL" in */health) HEALTH="$BASE_URL" ;; *) HEALTH="${BASE_URL}/health" ;; esac
+          fi
+
+          [ -n "${HEALTH}" ] && [ -n "${BASE_URL}" ] || { echo "No API URL"; exit 1; }
+
+          echo "BASE_URL_RESOLVED=$BASE_URL" | tee -a "$GITHUB_ENV"
+          echo "HEALTH_URL_RESOLVED=$HEALTH" | tee -a "$GITHUB_ENV"
+
+      - name: Smoke test /health
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="${HEALTH_URL_RESOLVED:?missing}"
+          ok=false
+          for i in {1..6}; do
+            code=$(curl -sS -m 12 -o /tmp/b.txt -w "%{http_code}" "$url" || true)
+            echo "::group::Attempt $i -> ${code}"; sed -e 's/^/| /' /tmp/b.txt; echo "::endgroup::"
+            if [ "$code" = "200" ] || [ "$code" = "204" ]; then ok=true; break; fi
+            sleep $((i*5))
+          done
+          [ "$ok" = "true" ]
+
+      - name: Smoke test /predict (optional)
+        if: ${{ hashFiles('features_input.json') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRED="${BASE_URL_RESOLVED%/}/predict"
+          RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PRED")
+          echo "$RES" | tee predict-response.json
+          jq -e '.predictions or .probabilities or .prediction or .result' predict-response.json >/dev/null
+
+      - name: Upload sls info
+        uses: actions/upload-artifact@v4
+        with:
+          name: sls-info
+          path: |
+            sls-info.txt
+            predict-response.json
+          if-no-files-found: ignore
+          retention-days: 7
