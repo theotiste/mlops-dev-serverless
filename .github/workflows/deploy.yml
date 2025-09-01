@@ -184,7 +184,7 @@ jobs:
 
   # ============== FRONTEND (S3 + CloudFront) ==============
   frontend-s3:
-    if: ${{ secrets.S3_BUCKET != '' }}
+    if: ${{ secrets.S3_BUCKET == 'mlopstheotiste-bucket' }}
     runs-on: ubuntu-latest
     needs: [deploy-backend]
 
@@ -226,7 +226,7 @@ jobs:
           done
 
       - name: Invalidate CloudFront (if set)
-        if: ${{ secrets.CF_DISTRIBUTION_ID != '' }}
+        if: ${{ secrets.CF_DISTRIBUTION_ID == 'E3E68BDJEEOMJS' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -236,7 +236,7 @@ jobs:
 
   # ============== FRONTEND (Amplify CI/CD) ==============
   frontend-amplify:
-    if: ${{ secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH_NAME != '' }}
+    if: ${{ secrets.AMPLIFY_APP_ID == 'd1s8fkj9in84k5' && secrets.AMPLIFY_BRANCH_NAME == 'main' }}
     runs-on: ubuntu-latest
     needs: [deploy-backend]
 
