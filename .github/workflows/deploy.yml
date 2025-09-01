@@ -176,6 +176,8 @@ jobs:
           done
           [ "$ok" = "true" ]
 
+          
+      
       - name: Smoke test /predict (optional)
         if: ${{ hashFiles('features_input.json') != '' }}
         shell: bash
