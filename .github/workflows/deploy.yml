@@ -8,6 +8,9 @@ on:
       - "serverless.yaml"
       - "handler.py"
       - "features_input.json"
+      - "form_validated.html"
+      - "result.html"
+      - "index.html"
       - ".github/workflows/deploy.yml"
   workflow_dispatch:
     inputs:
@@ -33,16 +36,19 @@ env:
   AWS_REGION: ${{ github.event.inputs.region || 'eu-west-3' }}
   SERVICE_NAME: cancer-prediction-api
   SLS_TELEMETRY_DISABLED: "1"
+  # (optionnel) URL complète de l'API d'inférence côté frontend (pour S3)
+  FRONTEND_API_URL: ${{ secrets.FRONTEND_API_URL }} # ex: https://api.mlopstheotiste.fr/predict
 
 jobs:
-  deploy:
+  # ===================== BACKEND (Serverless) =====================
+  deploy-backend:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node (no cache)
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -68,7 +74,6 @@ jobs:
           npm -v
           serverless -v
 
-      # ⛅️ AWS credentials (utilise tes clés longues durée en secrets)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -100,19 +105,13 @@ jobs:
           echo "=== sls-info.txt ==="
           cat sls-info.txt || true
 
-      # 🔎 Résolution robuste des endpoints
       - name: Resolve endpoints (health & predict)
         id: resolve
         shell: bash
         env:
-          HEALTH_URL_SECRET: ${{ secrets.HEALTH_URL }}   # ex: https://api.mlopstheotiste.fr/health (optionnel mais recommandé)
+          HEALTH_URL_SECRET: ${{ secrets.HEALTH_URL }} # ex: https://api.mlopstheotiste.fr/health (optionnel)
         run: |
           set -euo pipefail
-
-          echo "::group::sls-info.txt"
-          cat sls-info.txt || true
-          echo "::endgroup::"
-
           BASE_URL=""
           HEALTH_URL=""
 
@@ -122,7 +121,7 @@ jobs:
             BASE_URL="${HEALTH_URL%/health}"
           fi
 
-          # 2) sls-info: URL /health explicite
+          # 2) sls-info: URL /health
           if [ -z "${HEALTH_URL}" ]; then
             url=$(grep -Eo 'https://[^ ]+/health' sls-info.txt | head -1 || true)
             if [ -n "${url}" ]; then
@@ -131,7 +130,7 @@ jobs:
             fi
           fi
 
-          # 3) sls-info: 1ère URL générique
+          # 3) sls-info: première URL générique
           if [ -z "${BASE_URL}" ]; then
             base=$(grep -Eo 'https://[^ ]+' sls-info.txt | head -1 || true)
             if [ -n "${base}" ]; then
@@ -164,18 +163,16 @@ jobs:
             exit 1
           fi
 
-          echo "BASE_URL_RESOLVED=$BASE_URL"     | tee -a "$GITHUB_ENV"
+          echo "BASE_URL_RESOLVED=$BASE_URL"      | tee -a "$GITHUB_ENV"
           echo "HEALTH_URL_RESOLVED=$HEALTH_URL" | tee -a "$GITHUB_ENV"
           echo "Resolved BASE_URL=$BASE_URL"
           echo "Resolved HEALTH_URL=$HEALTH_URL"
 
-      - name: Smoke test /health (resolved)
+      - name: Smoke test /health
         shell: bash
         run: |
           set -euo pipefail
           HEALTH_URL="${HEALTH_URL_RESOLVED:?missing}"
-          echo "Health URL: $HEALTH_URL"
-
           ok=false
           for i in {1..6}; do
             code=$(curl -sS -m 12 -o /tmp/body.txt -w "%{http_code}" "$HEALTH_URL" || true)
@@ -185,22 +182,14 @@ jobs:
             if [ "$code" = "200" ] || [ "$code" = "204" ]; then ok=true; break; fi
             sleep $((i*5))
           done
-
-          if [ "$ok" != "true" ]; then
-            echo "❌ Healthcheck failed on $HEALTH_URL"
-            echo "::group::Derniers logs CloudWatch (health)"
-            serverless logs -f health -s "$STAGE" -r "$AWS_REGION" --startTime 10m || true
-            echo "::endgroup::"
-            exit 1
-          fi
+          [ "$ok" = "true" ] || { echo "❌ Healthcheck failed on $HEALTH_URL"; exit 1; }
 
       - name: Smoke test /predict (optional)
         if: ${{ hashFiles('features_input.json') != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          BASE="${BASE_URL_RESOLVED:?missing}"
-          PRED="${BASE%/}/predict"
+          PRED="${BASE_URL_RESOLVED%/}/predict"
           echo "Predict URL: ${PRED}"
           RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PRED")
           echo "$RES" | tee predict-response.json
@@ -216,7 +205,108 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Job summary
+  # ===================== FRONTEND (S3 + CloudFront) =====================
+  frontend-s3:
+    if: ${{ secrets.S3_BUCKET != '' }}
+    runs-on: ubuntu-latest
+    needs: [deploy-backend]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build static bundle (dist/)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # injection optionnelle de l'API_URL (si FRONTEND_API_URL est défini)
+          API="${FRONTEND_API_URL:-}"
+          if [ -n "$API" ]; then
+            sed "s|https://api.mlopstheotiste.fr/predict|$API|g" form_validated.html > dist/form_validated.html || cp form_validated.html dist/form_validated.html
+          else
+            cp form_validated.html dist/form_validated.html
+          fi
+          cp result.html dist/result.html
+          if [ -f index.html ]; then cp index.html dist/index.html; else
+            echo '<meta http-equiv="refresh" content="0; url=/form_validated.html">' > dist/index.html
+          fi
+
+      - name: Upload to S3 (public/)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUCKET="${{ secrets.S3_BUCKET }}"
+          aws s3 cp dist/ "s3://${BUCKET}/public/" --recursive --cache-control "no-cache, no-store, must-revalidate"
+          # Fixer Content-Type (HTML)
+          for f in form_validated.html result.html index.html; do
+            aws s3 cp "dist/$f" "s3://${BUCKET}/public/$f" \
+              --cache-control "no-cache, no-store, must-revalidate" --content-type "text/html"
+          done
+
+      - name: Invalidate CloudFront (if set)
+        if: ${{ secrets.CF_DISTRIBUTION_ID != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ secrets.CF_DISTRIBUTION_ID }}" \
+            --paths "/form_validated.html" "/result.html" "/index.html" "/"
+
+  # ===================== FRONTEND (Amplify CI/CD) =====================
+  frontend-amplify:
+    if: ${{ secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH_NAME != '' }}
+    runs-on: ubuntu-latest
+    needs: [deploy-backend]
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Trigger Amplify build & wait
+        shell: bash
+        env:
+          APP_ID: ${{ secrets.AMPLIFY_APP_ID }}
+          BRANCH: ${{ secrets.AMPLIFY_BRANCH_NAME }}
+        run: |
+          set -euo pipefail
+          echo "Trigger Amplify job on app=$APP_ID branch=$BRANCH"
+          aws amplify start-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-type RELEASE >/dev/null
+
+          # attendre la fin
+          for i in {1..40}; do
+            status=$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" \
+              --query 'jobSummaries[0].status' --output text 2>/dev/null || echo "UNKNOWN")
+            echo "Amplify status: $status"
+            case "$status" in
+              SUCCEED) break ;;
+              FAILED|CANCELLED) echo "❌ Amplify job $status"; exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done
+
+          domain=$(aws amplify get-app --app-id "$APP_ID" --query 'app.defaultDomain' --output text)
+          echo "AMPLIFY_URL=https://${BRANCH}.${domain}" | tee -a "$GITHUB_ENV"
+          echo "Amplify URL: https://${BRANCH}.${domain}"
+
+  # ===================== SUMMARY =====================
+  summary:
+    runs-on: ubuntu-latest
+    needs: [deploy-backend, frontend-s3, frontend-amplify]
+    if: always()
+    steps:
+      - name: Summary
         shell: bash
         run: |
           set -euo pipefail
@@ -225,7 +315,10 @@ jobs:
             echo "- **Service**: ${SERVICE_NAME}"
             echo "- **Stage**: ${STAGE}"
             echo "- **Region**: ${AWS_REGION}"
-            echo "- **BASE URL**: ${BASE_URL_RESOLVED}"
-            echo "- **Health**: ${HEALTH_URL_RESOLVED}"
-            [ -f predict-response.json ] && echo "- **Predict sample**: $(jq -c '.' predict-response.json)" || true
+            echo "- **BASE URL**: ${BASE_URL_RESOLVED:-n/a}"
+            echo "- **Health**: ${HEALTH_URL_RESOLVED:-n/a}"
+            echo "- **Frontend S3 bucket**: ${{ secrets.S3_BUCKET || 'n/a' }}"
+            echo "- **CloudFront**: ${{ secrets.CF_DISTRIBUTION_ID || 'n/a' }}"
+            echo "- **Amplify app**: ${{ secrets.AMPLIFY_APP_ID || 'n/a' }} (branch: ${{ secrets.AMPLIFY_BRANCH_NAME || 'n/a' }})"
+            [ -n "${AMPLIFY_URL:-}" ] && echo "- **Amplify URL**: ${AMPLIFY_URL}" || true
           } >> "$GITHUB_STEP_SUMMARY"
