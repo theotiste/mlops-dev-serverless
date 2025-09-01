@@ -113,45 +113,54 @@ jobs:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
           serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt || true
-          cat sls-info.txt || true
-
+          cat sls-info.txt || true 
+          
       - name: Resolve endpoints (health & predict)
         id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          BASE_URL=""
-          HEALTH="${HEALTH_URL:-}"
 
-          if [ -z "${HEALTH}" ]; then
-            url=$(grep -Eo 'https://[^ ]+/health' sls-info.txt | head -1 || true)
-            if [ -n "${url}" ]; then HEALTH="$url"; fi
+          HEALTH=""
+          PRED=""
+
+          # 1) Essayer de lire directement depuis sls-info.txt
+          if [ -f sls-info.txt ]; then
+            HEALTH=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -1 || true)
+            PRED=$(  grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -1 || true)
           fi
 
-          if [ -z "${BASE_URL}" ]; then
-            base=$(grep -Eo 'https://[^ ]+' sls-info.txt | head -1 || true)
-            if [ -n "${base}" ]; then BASE_URL="${base%/}"; fi
-          fi
-
-          if [ -z "${BASE_URL}" ]; then
-            STACK="${SERVICE_NAME}-${STAGE}"
+          # 2) Sinon, tenter via les sorties CloudFormation
+          if [ -z "${HEALTH}" ] || [ -z "${PRED}" ]; then
             outs=$(aws cloudformation describe-stacks \
-              --stack-name "$STACK" --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[].OutputValue" --output text 2>/dev/null || true)
-            if [ -n "${outs}" ]; then
-              BASE_URL=$(printf "%s\n" $outs | grep -E 'https://.*execute-api\..*amazonaws.com' | head -1 || true)
-              BASE_URL="${BASE_URL%/}"
+                     --stack-name "${SERVICE_NAME}-${STAGE}" \
+                     --region "$AWS_REGION" \
+                     --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" \
+                     --output text 2>/dev/null || true)
+            if [ -z "${HEALTH}" ]; then
+              HEALTH=$(printf "%s\n" "$outs" | awk '$1=="HealthUrl"{print $2}' | head -1 || true)
+            fi
+            if [ -z "${PRED}" ]; then
+              PRED=$(printf "%s\n" "$outs" | awk '$1=="PredictUrl"{print $2}' | head -1 || true)
             fi
           fi
 
-          if [ -z "${HEALTH}" ] && [ -n "${BASE_URL}" ]; then
-            case "$BASE_URL" in */health) HEALTH="$BASE_URL" ;; *) HEALTH="${BASE_URL}/health" ;; esac
+          # 3) Dernier recours : dériver /predict depuis /health
+          if [ -z "${PRED}" ] && [ -n "${HEALTH}" ]; then
+            root="${HEALTH%/health}"
+            PRED="${root%/}/predict"
           fi
 
-          [ -n "${HEALTH}" ] && [ -n "${BASE_URL}" ] || { echo "No API URL"; exit 1; }
+          # 4) Vérifications
+          [ -n "${HEALTH}" ] || { echo "❌ No HEALTH URL resolved"; exit 1; }
+          [ -n "${PRED}" ]   || { echo "❌ No PREDICT URL resolved"; exit 1; }
 
-          echo "BASE_URL_RESOLVED=$BASE_URL" | tee -a "$GITHUB_ENV"
           echo "HEALTH_URL_RESOLVED=$HEALTH" | tee -a "$GITHUB_ENV"
+          echo "PREDICT_URL_RESOLVED=$PRED" | tee -a "$GITHUB_ENV"
+
+          echo "::notice title=Resolved URLs::HEALTH=$HEALTH | PREDICT=$PRED"
+
+     
 
       - name: Smoke test /health
         shell: bash
