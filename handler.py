@@ -1,7 +1,6 @@
 import json, os, math, traceback, base64
 from typing import Any, Dict, List
 
-# ---- CORS ----
 ALLOWED_ORIGINS = {
     "https://form.mlopstheotiste.fr",
     os.getenv("AMPLIFY_URL", "https://main.d1s8fkj9in84k5.amplifyapp.com"),
@@ -36,7 +35,6 @@ def _resp(status: int, body: Dict[str, Any], origin: str) -> Dict[str, Any]:
         "body": json.dumps(_to_py(body)),
     }
 
-# ---- Modèle (chargement paresseux, fallback si absent) ----
 _MODEL = None
 def _load_model():
     global _MODEL
@@ -50,30 +48,26 @@ def _load_model():
             return _MODEL
     except Exception:
         traceback.print_exc()
-    _MODEL = "fallback"  # pas de modèle, on utilisera une heuristique simple
+    _MODEL = "fallback"
     return _MODEL
 
 def _predict_proba(features: List[float]) -> List[float]:
     m = _load_model()
     try:
         if m != "fallback":
-            proba = m.predict_proba([features])[0]  # ndarray (2,)
+            proba = m.predict_proba([features])[0]
             return [float(proba[0]), float(proba[1])]
     except Exception:
         traceback.print_exc()
-    # Fallback : petite heuristique stable (évite 500)
-    # ici: pondération grossière -> logistic sur la somme normalisée
     s = sum(features) / max(len(features), 1)
     p1 = 1.0 / (1.0 + math.exp(-0.01 * (s - 20.0)))
     p0 = 1.0 - p1
     return [float(p0), float(p1)]
 
-# ---- Handlers ----
 def predict(event, context):
     headers = event.get("headers") or {}
     origin = headers.get("origin") or headers.get("Origin") or "*"
 
-    # Préflight
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 204, "headers": _cors_headers(origin), "body": ""}
 
@@ -92,10 +86,7 @@ def predict(event, context):
             raise ValueError("invalid model output")
 
         pred = 1 if float(proba[1]) >= 0.5 else 0
-        return _resp(200, {
-            "predictions": [pred],
-            "probabilities": [[float(proba[0]), float(proba[1])]],
-        }, origin)
+        return _resp(200, {"predictions": [pred], "probabilities": [[float(proba[0]), float(proba[1])]]}, origin)
 
     except Exception as e:
         traceback.print_exc()
