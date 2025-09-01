@@ -16,11 +16,9 @@ on:
     inputs:
       stage:
         description: "Stage"
-        required: false
         default: "dev"
       region:
         description: "AWS region"
-        required: false
         default: "eu-west-3"
 
 concurrency:
@@ -31,7 +29,6 @@ permissions:
   id-token: write
   contents: read
 
-# Vars globales (OK de garder ces env pour les steps)
 env:
   STAGE: ${{ github.event.inputs.stage || 'dev' }}
   AWS_REGION: ${{ github.event.inputs.region || 'eu-west-3' }}
@@ -41,6 +38,7 @@ env:
   HEALTH_URL: ${{ secrets.HEALTH_URL }}
 
 jobs:
+  # ===================== BACKEND =====================
   deploy-backend:
     runs-on: ubuntu-latest
     steps:
@@ -62,7 +60,6 @@ jobs:
 
       - name: Install jq
         run: |
-          set -euo pipefail
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
           jq --version
@@ -83,25 +80,18 @@ jobs:
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
-          echo "serverless.* OK"
+        run: serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
 
       - name: Deploy
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
+        run: serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
 
       - name: Fetch API base URL (sls info)
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          set -euo pipefail
           serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt || true
-          echo "=== sls-info.txt ==="
           cat sls-info.txt || true
 
       - name: Resolve endpoints (health & predict)
@@ -109,20 +99,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           BASE_URL=""
           HEALTH="${HEALTH_URL:-}"
 
+          # 1) Essaye de trouver /health dans sls-info
           if [ -z "${HEALTH}" ]; then
             url=$(grep -Eo 'https://[^ ]+/health' sls-info.txt | head -1 || true)
             if [ -n "${url}" ]; then HEALTH="$url"; fi
           fi
 
+          # 2) 1ère URL générique
           if [ -z "${BASE_URL}" ]; then
             base=$(grep -Eo 'https://[^ ]+' sls-info.txt | head -1 || true)
             if [ -n "${base}" ]; then BASE_URL="${base%/}"; fi
           fi
 
+          # 3) CloudFormation Outputs si besoin
           if [ -z "${BASE_URL}" ]; then
             STACK="${SERVICE_NAME}-${STAGE}"
             outs=$(aws cloudformation describe-stacks \
@@ -134,13 +126,12 @@ jobs:
             fi
           fi
 
+          # 4) Compose HEALTH si absent
           if [ -z "${HEALTH}" ] && [ -n "${BASE_URL}" ]; then
             case "$BASE_URL" in */health) HEALTH="$BASE_URL" ;; *) HEALTH="${BASE_URL}/health" ;; esac
           fi
 
-          if [ -z "${HEALTH}" ] || [ -z "${BASE_URL}" ]; then
-            echo "❌ Aucune URL d'API trouvée."; exit 1
-          fi
+          [ -n "${HEALTH}" ] && [ -n "${BASE_URL}" ] || { echo "No API URL"; exit 1; }
 
           echo "BASE_URL_RESOLVED=$BASE_URL" | tee -a "$GITHUB_ENV"
           echo "HEALTH_URL_RESOLVED=$HEALTH" | tee -a "$GITHUB_ENV"
@@ -149,17 +140,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          HEALTH_URL="${HEALTH_URL_RESOLVED:?missing}"
+          url="${HEALTH_URL_RESOLVED:?missing}"
           ok=false
           for i in {1..6}; do
-            code=$(curl -sS -m 12 -o /tmp/body.txt -w "%{http_code}" "$HEALTH_URL" || true)
-            echo "::group::Attempt $i - HTTP ${code}"
-            sed -e 's/^/| /' /tmp/body.txt || true
-            echo "::endgroup::"
+            code=$(curl -sS -m 12 -o /tmp/b.txt -w "%{http_code}" "$url" || true)
+            echo "::group::Attempt $i -> ${code}"; sed -e 's/^/| /' /tmp/b.txt; echo "::endgroup::"
             if [ "$code" = "200" ] || [ "$code" = "204" ]; then ok=true; break; fi
             sleep $((i*5))
           done
-          [ "$ok" = "true" ] || { echo "❌ Healthcheck failed on $HEALTH_URL"; exit 1; }
+          [ "$ok" = "true" ]
 
       - name: Smoke test /predict (optional)
         if: ${{ hashFiles('features_input.json') != '' }}
@@ -167,7 +156,6 @@ jobs:
         run: |
           set -euo pipefail
           PRED="${BASE_URL_RESOLVED%/}/predict"
-          echo "Predict URL: ${PRED}"
           RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PRED")
           echo "$RES" | tee predict-response.json
           jq -e '.predictions or .probabilities or .prediction or .result' predict-response.json >/dev/null
@@ -182,17 +170,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # ============== FRONTEND (S3 + CloudFront) ==============
+  # ===================== FRONTEND (S3 + CloudFront) =====================
   frontend-s3:
-    if: ${{ secrets.S3_BUCKET == 'mlopstheotiste-bucket' }}
     runs-on: ubuntu-latest
     needs: [deploy-backend]
-
     steps:
+      - name: Decide run (S3)
+        id: decide_s3
+        run: |
+          if [ -n "${{ secrets.S3_BUCKET }}" ]; then echo "run=true" >> $GITHUB_OUTPUT; else echo "run=false" >> $GITHUB_OUTPUT; fi
+
       - name: Checkout
+        if: ${{ steps.decide_s3.outputs.run == 'true' }}
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
+        if: ${{ steps.decide_s3.outputs.run == 'true' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -200,6 +193,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Build static bundle (dist/)
+        if: ${{ steps.decide_s3.outputs.run == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -216,32 +210,46 @@ jobs:
           fi
 
       - name: Upload to S3 (public/)
+        if: ${{ steps.decide_s3.outputs.run == 'true' }}
         shell: bash
+        env:
+          BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
           set -euo pipefail
-          aws s3 cp dist/ "s3://${{ secrets.S3_BUCKET }}/public/" --recursive --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 cp dist/ "s3://${BUCKET}/public/" --recursive --cache-control "no-cache, no-store, must-revalidate"
           for f in form_validated.html result.html index.html; do
-            aws s3 cp "dist/$f" "s3://${{ secrets.S3_BUCKET }}/public/$f" \
+            aws s3 cp "dist/$f" "s3://${BUCKET}/public/$f" \
               --cache-control "no-cache, no-store, must-revalidate" --content-type "text/html"
           done
 
-      - name: Invalidate CloudFront (if set)
-        if: ${{ secrets.CF_DISTRIBUTION_ID == 'E3E68BDJEEOMJS' }}
+      - name: Invalidate CloudFront
+        if: ${{ steps.decide_s3.outputs.run == 'true' && secrets.CF_DISTRIBUTION_ID != '' }}
         shell: bash
         run: |
-          set -euo pipefail
           aws cloudfront create-invalidation \
             --distribution-id "${{ secrets.CF_DISTRIBUTION_ID }}" \
             --paths "/form_validated.html" "/result.html" "/index.html" "/"
 
-  # ============== FRONTEND (Amplify CI/CD) ==============
+      - name: Skipped (no S3_BUCKET)
+        if: ${{ steps.decide_s3.outputs.run != 'true' }}
+        run: echo "No S3 bucket secret; S3 deploy skipped."
+
+  # ===================== FRONTEND (Amplify CI/CD) =====================
   frontend-amplify:
-    if: ${{ secrets.AMPLIFY_APP_ID == 'd1s8fkj9in84k5' && secrets.AMPLIFY_BRANCH_NAME == 'main' }}
     runs-on: ubuntu-latest
     needs: [deploy-backend]
-
     steps:
+      - name: Decide run (Amplify)
+        id: decide_amp
+        run: |
+          if [ -n "${{ secrets.AMPLIFY_APP_ID }}" ] && [ -n "${{ secrets.AMPLIFY_BRANCH_NAME }}" ]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          else
+            echo "run=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Configure AWS credentials
+        if: ${{ steps.decide_amp.outputs.run == 'true' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -249,6 +257,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Trigger Amplify build & wait
+        if: ${{ steps.decide_amp.outputs.run == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -259,12 +268,16 @@ jobs:
             echo "Amplify status: $status"
             case "$status" in
               SUCCEED) break ;;
-              FAILED|CANCELLED) echo "❌ Amplify job $status"; exit 1 ;;
+              FAILED|CANCELLED) echo "Amplify job $status"; exit 1 ;;
               *) sleep 10 ;;
             esac
           done
           domain=$(aws amplify get-app --app-id "${{ secrets.AMPLIFY_APP_ID }}" --query 'app.defaultDomain' --output text)
           echo "AMPLIFY_URL=https://${{ secrets.AMPLIFY_BRANCH_NAME }}.${domain}" | tee -a "$GITHUB_ENV"
+
+      - name: Skipped (no Amplify secrets)
+        if: ${{ steps.decide_amp.outputs.run != 'true' }}
+        run: echo "No Amplify secrets; Amplify step skipped."
 
   # ===================== SUMMARY =====================
   summary:
@@ -275,16 +288,12 @@ jobs:
       - name: Summary
         shell: bash
         run: |
-          set -euo pipefail
           {
             echo "## Deploy summary"
-            echo "- **Service**: ${SERVICE_NAME}"
-            echo "- **Stage**: ${STAGE}"
-            echo "- **Region**: ${AWS_REGION}"
-            echo "- **BASE URL**: ${BASE_URL_RESOLVED:-n/a}"
-            echo "- **Health**: ${HEALTH_URL_RESOLVED:-n/a}"
-            echo "- **Frontend S3 bucket**: ${{ secrets.S3_BUCKET || 'n/a' }}"
-            echo "- **CloudFront**: ${{ secrets.CF_DISTRIBUTION_ID || 'n/a' }}"
-            echo "- **Amplify app**: ${{ secrets.AMPLIFY_APP_ID || 'n/a' }} (branch: ${{ secrets.AMPLIFY_BRANCH_NAME || 'n/a' }})"
-            [ -n "${AMPLIFY_URL:-}" ] && echo "- **Amplify URL**: ${AMPLIFY_URL}" || true
+            echo "- Service: ${SERVICE_NAME}"
+            echo "- Stage: ${STAGE}"
+            echo "- Region: ${AWS_REGION}"
+            echo "- BASE URL: ${BASE_URL_RESOLVED:-n/a}"
+            echo "- Health: ${HEALTH_URL_RESOLVED:-n/a}"
+            echo "- Frontend API URL: ${FRONTEND_API_URL:-n/a}"
           } >> "$GITHUB_STEP_SUMMARY"
