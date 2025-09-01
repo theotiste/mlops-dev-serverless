@@ -51,6 +51,10 @@ functions:
   predict:
     handler: handler.predict
     timeout: 20
+    layers:
+      # ARNs des layers (numpy + scikit-learn) – adapte si besoin
+      - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
+      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11
     events:
       - http:
           path: predict
@@ -78,6 +82,11 @@ functions:
 
   health:
     handler: handler.health
+    timeout: 15
+    layers:
+      # ARNs des layers (numpy + scikit-learn) – adapte si besoin
+      - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
+      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11
     events:
       - http:
           path: health
