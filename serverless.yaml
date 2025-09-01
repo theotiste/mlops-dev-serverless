@@ -14,7 +14,6 @@ provider:
     lambda: true
   environment:
     STAGE: ${sls:stage}
-  # REST API Gateway options
   apiGateway:
     minimumCompressionSize: 1024
   logs:
@@ -37,12 +36,9 @@ package:
     - '!venv/**'
     - '!tests/**'
     - 'handler.py'
-    - 'model/**' # si tu as un dossier modèle
+    - 'model/**'
 
 custom:
-  # Mets ici ton domaine Amplify si tu veux éviter la valeur par défaut.
-  # export AMPLIFY_URL="https://main.xxxxxx.amplifyapp.com" avant le deploy,
-  # ou ajoute AMPLIFY_URL dans tes secrets/vars de CI.
   allowedOrigins:
     - https://form.mlopstheotiste.fr
     - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
@@ -51,10 +47,6 @@ functions:
   predict:
     handler: handler.predict
     timeout: 20
-    layers:
-      # ARNs des layers (numpy + scikit-learn) – adapte si besoin
-      - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
-      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11
     events:
       - http:
           path: predict
@@ -64,7 +56,6 @@ functions:
             headers:
               - Content-Type
             allowCredentials: false
-          # ✅ Validation côté API Gateway (évite le "Missing `features`")
           request:
             schemas:
               application/json:
@@ -82,11 +73,6 @@ functions:
 
   health:
     handler: handler.health
-    timeout: 15
-    layers:
-      # ARNs des layers (numpy + scikit-learn) – adapte si besoin
-      - arn:aws:lambda:eu-west-3:571600829584:layer:numpy-layer:2
-      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-layer:11
     events:
       - http:
           path: health
