@@ -1,5 +1,5 @@
 service: cancer-prediction-api
-frameworkVersion: '4'
+frameworkVersion: "4"
 configValidationMode: error
 
 provider:
@@ -30,13 +30,21 @@ provider:
     Service: cancer-prediction-api
     Stage: ${sls:stage}
 
+# 🚫 On exclut TOUT par défaut, puis on inclut uniquement ce qui est nécessaire par fonction
 package:
+  individually: true
   patterns:
+    - '!**'                 # exclut tout par défaut
+    - '!.git/**'
     - '!node_modules/**'
     - '!venv/**'
-    - '!tests/**'
-    - 'handler.py'
-    - 'model/**'
+    - '!train-venv/**'
+    - '!model-layer/**'
+    - '!**/__pycache__/**'
+    - '!**/*.ipynb'
+    - '!**/*.csv'
+    - '!**/*.parquet'
+    - '!**/*.md'
 
 custom:
   allowedOrigins:
@@ -44,8 +52,25 @@ custom:
     - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
 
 functions:
+  # ➜ Fonction légère pour /health : uniquement handler.py
+  health:
+    handler: handler.health
+    package:
+      patterns:
+        - 'handler.py'
+    events:
+      - http:
+          path: health
+          method: get
+          cors: true
+
+  # ➜ Fonction /predict : handler + éventuel modèle .joblib (mais rien d’autre)
   predict:
     handler: handler.predict
+    package:
+      patterns:
+        - 'handler.py'
+        - 'model/*.joblib'     # ajuste si ton fichier a un autre nom/extension
     timeout: 20
     events:
       - http:
@@ -70,48 +95,40 @@ functions:
                       items:
                         type: number
 
-  health:
-    handler: handler.health
-    events:
-      - http:
-          path: health
-          method: get
-          cors: true
-
 resources:
   Outputs:
     ServiceEndpoint:
       Description: REST API base URL
       Value:
         Fn::Join:
-          - ''
-          - - 'https://'
+          - ""
+          - - "https://"
             - Ref: ApiGatewayRestApi
-            - '.execute-api.'
+            - ".execute-api."
             - Ref: AWS::Region
-            - '.amazonaws.com/'
+            - ".amazonaws.com/"
             - ${sls:stage}
     HealthUrl:
       Description: Healthcheck URL
       Value:
         Fn::Join:
-          - ''
-          - - 'https://'
+          - ""
+          - - "https://"
             - Ref: ApiGatewayRestApi
-            - '.execute-api.'
+            - ".execute-api."
             - Ref: AWS::Region
-            - '.amazonaws.com/'
+            - ".amazonaws.com/"
             - ${sls:stage}
-            - '/health'
+            - "/health"
     PredictUrl:
       Description: Predict URL
       Value:
         Fn::Join:
-          - ''
-          - - 'https://'
+          - ""
+          - - "https://"
             - Ref: ApiGatewayRestApi
-            - '.execute-api.'
+            - ".execute-api."
             - Ref: AWS::Region
-            - '.amazonaws.com/'
+            - ".amazonaws.com/"
             - ${sls:stage}
-            - '/predict'
+            - "/predict"
