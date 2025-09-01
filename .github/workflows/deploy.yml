@@ -179,15 +179,29 @@ jobs:
           
       
       - name: Smoke test /predict (optional)
+
         if: ${{ hashFiles('features_input.json') != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          PRED="${BASE_URL_RESOLVED%/}/predict"
-          RES=$(curl -fsS -H "Content-Type: application/json" -d @features_input.json "$PRED")
-          echo "$RES" | tee predict-response.json
+          PRED="${PREDICT_URL_RESOLVED:?missing PREDICT_URL_RESOLVED}"
+          echo "Predict URL: $PRED"
+
+          # on récupère le code HTTP et on garde le corps pour debug
+          code=$(curl -sS -o predict-response.json -w "%{http_code}" \
+                 -H "Content-Type: application/json" \
+                 -d @features_input.json "$PRED" || true)
+
+          echo "::group::/predict response (HTTP $code)"
+          cat predict-response.json || true
+          echo "::endgroup::"
+
+          # on échoue si pas 200 ou si le JSON ne contient pas un des champs attendus
+          [ "$code" = "200" ] || { echo "HTTP $code from $PRED"; exit 1; }
           jq -e '.predictions or .probabilities or .prediction or .result' predict-response.json >/dev/null
 
+
+       
       - name: Upload sls info
         uses: actions/upload-artifact@v4
         with:
