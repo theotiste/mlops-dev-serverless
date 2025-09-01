@@ -36,11 +36,10 @@ env:
   AWS_REGION: ${{ github.event.inputs.region || 'eu-west-3' }}
   SERVICE_NAME: cancer-prediction-api
   SLS_TELEMETRY_DISABLED: "1"
-  # (optionnel) URL complète de l'API d'inférence côté frontend (pour S3)
-  FRONTEND_API_URL: ${{ secrets.FRONTEND_API_URL }} # ex: https://api.mlopstheotiste.fr/predict
+  FRONTEND_API_URL: ${{ secrets.FRONTEND_API_URL }}
 
 jobs:
-  # ===================== BACKEND (Serverless) =====================
+  # ===================== BACKEND =====================
   deploy-backend:
     runs-on: ubuntu-latest
 
@@ -109,19 +108,17 @@ jobs:
         id: resolve
         shell: bash
         env:
-          HEALTH_URL_SECRET: ${{ secrets.HEALTH_URL }} # ex: https://api.mlopstheotiste.fr/health (optionnel)
+          HEALTH_URL_SECRET: ${{ secrets.HEALTH_URL }}
         run: |
           set -euo pipefail
           BASE_URL=""
           HEALTH_URL=""
 
-          # 1) Secret direct (si fourni)
           if [ -n "${HEALTH_URL_SECRET:-}" ]; then
             HEALTH_URL="$HEALTH_URL_SECRET"
             BASE_URL="${HEALTH_URL%/health}"
           fi
 
-          # 2) sls-info: URL /health
           if [ -z "${HEALTH_URL}" ]; then
             url=$(grep -Eo 'https://[^ ]+/health' sls-info.txt | head -1 || true)
             if [ -n "${url}" ]; then
@@ -130,7 +127,6 @@ jobs:
             fi
           fi
 
-          # 3) sls-info: première URL générique
           if [ -z "${BASE_URL}" ]; then
             base=$(grep -Eo 'https://[^ ]+' sls-info.txt | head -1 || true)
             if [ -n "${base}" ]; then
@@ -138,7 +134,6 @@ jobs:
             fi
           fi
 
-          # 4) CloudFormation Outputs (ServiceEndpoint / HttpApiUrl)
           if [ -z "${BASE_URL}" ]; then
             STACK="${SERVICE_NAME}-${STAGE}"
             outs=$(aws cloudformation describe-stacks \
@@ -150,7 +145,6 @@ jobs:
             fi
           fi
 
-          # 5) Compose HEALTH_URL si besoin
           if [ -z "${HEALTH_URL}" ] && [ -n "${BASE_URL}" ]; then
             case "$BASE_URL" in
               */health) HEALTH_URL="$BASE_URL" ;;
@@ -159,7 +153,7 @@ jobs:
           fi
 
           if [ -z "${HEALTH_URL}" ] || [ -z "${BASE_URL}" ]; then
-            echo "❌ Aucune URL d'API trouvée. Définis le secret HEALTH_URL (ex: https://ton-api/health) ou expose ServiceEndpoint dans les Outputs CFN."
+            echo "❌ Aucune URL d'API trouvée."
             exit 1
           fi
 
@@ -227,7 +221,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # injection optionnelle de l'API_URL (si FRONTEND_API_URL est défini)
           API="${FRONTEND_API_URL:-}"
           if [ -n "$API" ]; then
             sed "s|https://api.mlopstheotiste.fr/predict|$API|g" form_validated.html > dist/form_validated.html || cp form_validated.html dist/form_validated.html
@@ -241,23 +234,25 @@ jobs:
 
       - name: Upload to S3 (public/)
         shell: bash
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
           set -euo pipefail
-          BUCKET="${{ secrets.S3_BUCKET }}"
-          aws s3 cp dist/ "s3://${BUCKET}/public/" --recursive --cache-control "no-cache, no-store, must-revalidate"
-          # Fixer Content-Type (HTML)
+          aws s3 cp dist/ "s3://${S3_BUCKET}/public/" --recursive --cache-control "no-cache, no-store, must-revalidate"
           for f in form_validated.html result.html index.html; do
-            aws s3 cp "dist/$f" "s3://${BUCKET}/public/$f" \
+            aws s3 cp "dist/$f" "s3://${S3_BUCKET}/public/$f" \
               --cache-control "no-cache, no-store, must-revalidate" --content-type "text/html"
           done
 
       - name: Invalidate CloudFront (if set)
         if: ${{ secrets.CF_DISTRIBUTION_ID != '' }}
         shell: bash
+        env:
+          CF_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
         run: |
           set -euo pipefail
           aws cloudfront create-invalidation \
-            --distribution-id "${{ secrets.CF_DISTRIBUTION_ID }}" \
+            --distribution-id "${CF_ID}" \
             --paths "/form_validated.html" "/result.html" "/index.html" "/"
 
   # ===================== FRONTEND (Amplify CI/CD) =====================
@@ -281,10 +276,7 @@ jobs:
           BRANCH: ${{ secrets.AMPLIFY_BRANCH_NAME }}
         run: |
           set -euo pipefail
-          echo "Trigger Amplify job on app=$APP_ID branch=$BRANCH"
           aws amplify start-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-type RELEASE >/dev/null
-
-          # attendre la fin
           for i in {1..40}; do
             status=$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" \
               --query 'jobSummaries[0].status' --output text 2>/dev/null || echo "UNKNOWN")
@@ -295,10 +287,8 @@ jobs:
               *) sleep 10 ;;
             esac
           done
-
           domain=$(aws amplify get-app --app-id "$APP_ID" --query 'app.defaultDomain' --output text)
           echo "AMPLIFY_URL=https://${BRANCH}.${domain}" | tee -a "$GITHUB_ENV"
-          echo "Amplify URL: https://${BRANCH}.${domain}"
 
   # ===================== SUMMARY =====================
   summary:
@@ -307,6 +297,11 @@ jobs:
     if: always()
     steps:
       - name: Summary
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          CF_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
+          AMP_ID: ${{ secrets.AMPLIFY_APP_ID }}
+          AMP_BRANCH: ${{ secrets.AMPLIFY_BRANCH_NAME }}
         shell: bash
         run: |
           set -euo pipefail
@@ -317,8 +312,8 @@ jobs:
             echo "- **Region**: ${AWS_REGION}"
             echo "- **BASE URL**: ${BASE_URL_RESOLVED:-n/a}"
             echo "- **Health**: ${HEALTH_URL_RESOLVED:-n/a}"
-            echo "- **Frontend S3 bucket**: ${{ secrets.S3_BUCKET || 'n/a' }}"
-            echo "- **CloudFront**: ${{ secrets.CF_DISTRIBUTION_ID || 'n/a' }}"
-            echo "- **Amplify app**: ${{ secrets.AMPLIFY_APP_ID || 'n/a' }} (branch: ${{ secrets.AMPLIFY_BRANCH_NAME || 'n/a' }})"
+            echo "- **Frontend S3 bucket**: ${S3_BUCKET:-n/a}"
+            echo "- **CloudFront**: ${CF_ID:-n/a}"
+            echo "- **Amplify app**: ${AMP_ID:-n/a} (branch: ${AMP_BRANCH:-n/a})"
             [ -n "${AMPLIFY_URL:-}" ] && echo "- **Amplify URL**: ${AMPLIFY_URL}" || true
           } >> "$GITHUB_STEP_SUMMARY"
