@@ -1,69 +1,81 @@
 service: cancer-prediction-api
-frameworkVersion: "4"
-
+frameworkVersion: '>=3 <5'
+configValidationMode: error
 
 provider:
   name: aws
   runtime: python3.12
-  region: eu-west-3
-  memorySize: 1024
+  region: ${opt:region, 'eu-west-3'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
   timeout: 15
-  versionFunctions: true
-
-  # Observabilité
-  logRetentionInDays: 30
+  logRetentionInDays: 14
   tracing:
     lambda: true
-    apiGateway: true
-  logs:
-    httpApi: true                       # logs d’accès API Gateway (HTTP API v2)
-
-  httpApi:
-    cors:
-      allowedOrigins: ["*"]
-      allowedHeaders: ["Content-Type"]
-      allowedMethods: ["GET", "POST", "OPTIONS"]
-
   environment:
-    S3_BUCKET: mlopstheotiste-bucket       # <-- adapte si besoin
-    MODEL_KEY: models/RandomForest.pkl     # <-- adapte si besoin
-
-  iam:
-    role:
-      statements:
-        # Lecture du modèle depuis S3
-        - Effect: Allow
-          Action: s3:GetObject
-          Resource:
-            - arn:aws:s3:::${self:provider.environment.S3_BUCKET}/${self:provider.environment.MODEL_KEY}
-            - arn:aws:s3:::${self:provider.environment.S3_BUCKET}/models/*
-
-        # (facultatif) X-Ray pour traces détaillées
-        - Effect: Allow
-          Action:
-            - xray:PutTraceSegments
-            - xray:PutTelemetryRecords
-          Resource: "*"
+    STAGE: ${sls:stage}
+  # REST API Gateway options
+  apiGateway:
+    minimumCompressionSize: 1024
+  logs:
+    restApi:
+      accessLogging: true
+      executionLogging: true
+      level: INFO
+      fullExecutionData: false
+  deploymentBucket:
+    blockPublicAccess: true
+    serverSideEncryption: AES256
+  tags:
+    Project: mlops-breast-cancer
+    Service: cancer-prediction-api
+    Stage: ${sls:stage}
 
 package:
   patterns:
-    - "!**"              # exclure tout…
-    - handler.py         # …sauf le code Lambda
-    
+    - '!node_modules/**'
+    - '!venv/**'
+    - '!tests/**'
+    - 'handler.py'
+    - 'model/**' # si tu as un dossier modèle
+
+custom:
+  # Mets ici ton domaine Amplify si tu veux éviter la valeur par défaut.
+  # export AMPLIFY_URL="https://main.xxxxxx.amplifyapp.com" avant le deploy,
+  # ou ajoute AMPLIFY_URL dans tes secrets/vars de CI.
+  allowedOrigins:
+    - https://form.mlopstheotiste.fr
+    - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
+
 functions:
   predict:
     handler: handler.predict
+    timeout: 20
     events:
       - http:
           path: predict
           method: post
           cors:
-            origins:
-              - https://main.d1s8fkj9in84k5.amplifyapp.com
-              - https://form.mlopstheotiste.fr
+            origins: ${self:custom.allowedOrigins}
             headers:
               - Content-Type
             allowCredentials: false
+          # ✅ Validation côté API Gateway (évite le "Missing `features`")
+          request:
+            schemas:
+              application/json:
+                name: PredictRequest
+                schema:
+                  type: object
+                  required: [features]
+                  properties:
+                    features:
+                      type: array
+                      minItems: 30
+                      maxItems: 30
+                      items:
+                        type: number
+
   health:
     handler: handler.health
     events:
@@ -72,61 +84,40 @@ functions:
           method: get
           cors: true
 
-
- # serverless.yml – extrait monitoring correctif (HTTP API)
-custom:
-  alerts:
-    dashboards: true
-
-    topics:
-      alarm:
-        topic: ${self:service}-${sls:stage}-alerts
-        notifications:
-          - protocol: email
-            endpoint: ${env:ALERT_EMAIL, 'change-me@example.com'}
-
-    definitions:
-      lambdaErrors:
-        namespace: AWS/Lambda
-        metric: Errors
-        threshold: 1
-        statistic: Sum
-        period: 60
-        evaluationPeriods: 1
-        comparisonOperator: GreaterThanOrEqualToThreshold
-        treatMissingData: notBreaching
-
-      lambdaThrottles:
-        namespace: AWS/Lambda
-        metric: Throttles
-        threshold: 1
-        statistic: Sum
-        period: 60
-        evaluationPeriods: 1
-        comparisonOperator: GreaterThanOrEqualToThreshold
-        treatMissingData: notBreaching
-
-      apiGateway5xx:                 # <-- NOM DE LA DÉFINITION (libre)
-        namespace: AWS/ApiGateway
-        metric: 5XXError
-        threshold: 1
-        statistic: Sum
-        period: 60
-        evaluationPeriods: 1
-        comparisonOperator: GreaterThanOrEqualToThreshold
-        treatMissingData: notBreaching
-        # Dimensions pour **HTTP API** (v2)
-        dimensions:
-          - Name: ApiId
-            Value:
-              Ref: HttpApi          # référence CloudFormation du HttpApi créé par Serverless
-          - Name: Stage
-            Value: ${sls:stage}
-
-    # On demande explicitement ces alarmes
-    alarms:
-      - lambdaErrors
-      - lambdaThrottles
-      - apiGateway5xx              # <-- on appelle la définition ci-dessus
-         
-
+resources:
+  Outputs:
+    ServiceEndpoint:
+      Description: REST API base URL
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: ApiGatewayRestApi
+            - '.execute-api.'
+            - Ref: AWS::Region
+            - '.amazonaws.com/'
+            - ${sls:stage}
+    HealthUrl:
+      Description: Healthcheck URL
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: ApiGatewayRestApi
+            - '.execute-api.'
+            - Ref: AWS::Region
+            - '.amazonaws.com/'
+            - ${sls:stage}
+            - '/health'
+    PredictUrl:
+      Description: Predict URL
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: ApiGatewayRestApi
+            - '.execute-api.'
+            - Ref: AWS::Region
+            - '.amazonaws.com/'
+            - ${sls:stage}
+            - '/predict'
