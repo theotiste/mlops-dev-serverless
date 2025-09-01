@@ -53,8 +53,7 @@ functions:
           method: post
           cors:
             origins: ${self:custom.allowedOrigins}
-            headers:
-              - Content-Type
+            headers: [ Content-Type ]
             allowCredentials: false
           request:
             schemas:
