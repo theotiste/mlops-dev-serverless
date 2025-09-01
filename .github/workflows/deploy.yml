@@ -73,7 +73,37 @@ jobs:
       - name: Validate Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless print --stage "$STAGE" --region "$AWS_REGION" >/dev/null
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "::group::Repo tree (top-level)"
+          ls -la
+          echo "::endgroup::"
+
+          # Détecte et force le bon fichier de config
+          CONFIG=""
+          if [ -f serverless.yml ];  then CONFIG="serverless.yml";  fi
+          if [ -f serverless.yaml ]; then CONFIG="serverless.yaml"; fi
+
+          if [ -z "$CONFIG" ]; then
+            echo "❌ Aucun serverless.(yml|yaml) trouvé à la racine du repo."
+            exit 1
+          fi
+
+          echo "Using Serverless config: $CONFIG"
+          echo "::group::serverless print output"
+          # NE PAS /dev/null : on affiche l’erreur réelle si ça casse
+          serverless print --config "$CONFIG" --stage "$STAGE" --region "$AWS_REGION" || {
+            echo "---- Contenu du fichier $CONFIG (pour debug) ----"
+            sed -n '1,200p' "$CONFIG" || true
+            echo "-----------------------------------------------"
+            exit 1
+          }
+          echo "::endgroup::"
+Pourquoi ça règle le souci 
+          
+        
 
       - name: Deploy
         env:
