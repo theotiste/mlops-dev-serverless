@@ -172,67 +172,88 @@ jobs:
 
   # ===================== FRONTEND (S3 + CloudFront) =====================
   frontend-s3:
-    runs-on: ubuntu-latest
-    needs: [deploy-backend]
-    steps:
-      - name: Decide run (S3)
-        id: decide_s3
-        run: |
-          if [ -n "${{ secrets.S3_BUCKET }}" ]; then echo "run=true" >> $GITHUB_OUTPUT; else echo "run=false" >> $GITHUB_OUTPUT; fi
+  runs-on: ubuntu-latest
+  needs: [deploy-backend]
+  steps:
+    # 1) Décide si on fait S3
+    - name: Decide run (S3)
+      id: decide_s3
+      run: |
+        if [ -n "${{ secrets.S3_BUCKET }}" ]; then
+          echo "run=true"  >> $GITHUB_OUTPUT
+        else
+          echo "run=false" >> $GITHUB_OUTPUT
+        fi
 
-      - name: Checkout
-        if: ${{ steps.decide_s3.outputs.run == 'true' }}
-        uses: actions/checkout@v4
+    # 2) Décide si on a un CF à invalider (⚠️ pas de secrets dans if plus tard)
+    - name: Decide CF
+      id: decide_cf
+      run: |
+        if [ -n "${{ secrets.CF_DISTRIBUTION_ID }}" ]; then
+          echo "run=true"  >> $GITHUB_OUTPUT
+        else
+          echo "run=false" >> $GITHUB_OUTPUT
+        fi
 
-      - name: Configure AWS credentials
-        if: ${{ steps.decide_s3.outputs.run == 'true' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+    - name: Checkout
+      if: ${{ steps.decide_s3.outputs.run == 'true' }}
+      uses: actions/checkout@v4
 
-      - name: Build static bundle (dist/)
-        if: ${{ steps.decide_s3.outputs.run == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          API="${FRONTEND_API_URL:-}"
-          if [ -n "$API" ]; then
-            sed "s|https://api.mlopstheotiste.fr/predict|$API|g" form_validated.html > dist/form_validated.html || cp form_validated.html dist/form_validated.html
-          else
-            cp form_validated.html dist/form_validated.html
-          fi
-          cp result.html dist/result.html
-          if [ -f index.html ]; then cp index.html dist/index.html; else
-            echo '<meta http-equiv="refresh" content="0; url=/form_validated.html">' > dist/index.html
-          fi
+    - name: Configure AWS credentials
+      if: ${{ steps.decide_s3.outputs.run == 'true' }}
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload to S3 (public/)
-        if: ${{ steps.decide_s3.outputs.run == 'true' }}
-        shell: bash
-        env:
-          BUCKET: ${{ secrets.S3_BUCKET }}
-        run: |
-          set -euo pipefail
-          aws s3 cp dist/ "s3://${BUCKET}/public/" --recursive --cache-control "no-cache, no-store, must-revalidate"
-          for f in form_validated.html result.html index.html; do
-            aws s3 cp "dist/$f" "s3://${BUCKET}/public/$f" \
-              --cache-control "no-cache, no-store, must-revalidate" --content-type "text/html"
-          done
+    - name: Build static bundle (dist/)
+      if: ${{ steps.decide_s3.outputs.run == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        API="${FRONTEND_API_URL:-}"
+        if [ -n "$API" ]; then
+          sed "s|https://api.mlopstheotiste.fr/predict|$API|g" form_validated.html > dist/form_validated.html || cp form_validated.html dist/form_validated.html
+        else
+          cp form_validated.html dist/form_validated.html
+        fi
+        cp result.html dist/result.html
+        if [ -f index.html ]; then cp index.html dist/index.html; else
+          echo '<meta http-equiv="refresh" content="0; url=/form_validated.html">' > dist/index.html
+        fi
 
-      - name: Invalidate CloudFront
-        if: ${{ steps.decide_s3.outputs.run == 'true' && secrets.CF_DISTRIBUTION_ID != '' }}
-        shell: bash
-        run: |
-          aws cloudfront create-invalidation \
-            --distribution-id "${{ secrets.CF_DISTRIBUTION_ID }}" \
-            --paths "/form_validated.html" "/result.html" "/index.html" "/"
+    - name: Upload to S3 (public/)
+      if: ${{ steps.decide_s3.outputs.run == 'true' }}
+      shell: bash
+      env:
+        BUCKET: ${{ secrets.S3_BUCKET }}
+      run: |
+        set -euo pipefail
+        aws s3 cp dist/ "s3://${BUCKET}/public/" --recursive --cache-control "no-cache, no-store, must-revalidate"
+        for f in form_validated.html result.html index.html; do
+          aws s3 cp "dist/$f" "s3://${BUCKET}/public/$f" \
+            --cache-control "no-cache, no-store, must-revalidate" --content-type "text/html"
+        done
 
-      - name: Skipped (no S3_BUCKET)
-        if: ${{ steps.decide_s3.outputs.run != 'true' }}
-        run: echo "No S3 bucket secret; S3 deploy skipped."
+    # 3) Invalidation CF sans secrets dans le if
+    - name: Invalidate CloudFront
+      if: ${{ steps.decide_s3.outputs.run == 'true' && steps.decide_cf.outputs.run == 'true' }}
+      shell: bash
+      env:
+        CF_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
+      run: |
+        set -euo pipefail
+        aws cloudfront create-invalidation \
+          --distribution-id "${CF_ID}" \
+          --paths "/form_validated.html" "/result.html" "/index.html" "/"
+
+    - name: Skipped (no S3/CF)
+      if: ${{ steps.decide_s3.outputs.run != 'true' }}
+      run: echo "No S3 bucket secret; S3 deploy skipped."
+ 
+ 
 
   # ===================== FRONTEND (Amplify CI/CD) =====================
   frontend-amplify:
