@@ -1,98 +1,97 @@
-import json, os, math, traceback, base64
-from typing import Any, Dict, List
+import json
+import os
+import base64
+import traceback
 
-ALLOWED_ORIGINS = {
-    "https://form.mlopstheotiste.fr",
-    os.getenv("AMPLIFY_URL", "https://main.d1s8fkj9in84k5.amplifyapp.com"),
-}
+try:
+    # charge ici ton modèle si présent
+    from joblib import load
+    _MODEL = None
+    model_path = os.path.join(os.path.dirname(__file__), "model", "model.joblib")
+    if os.path.exists(model_path):
+        _MODEL = load(model_path)
+except Exception:
+    _MODEL = None
 
-def _cors_headers(origin: str) -> Dict[str, str]:
-    allow = origin if origin in ALLOWED_ORIGINS else list(ALLOWED_ORIGINS)[0]
-    return {
-        "Access-Control-Allow-Origin": allow,
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "OPTIONS,POST,GET",
-    }
-
-def _to_py(x: Any) -> Any:
-    try:
-        if hasattr(x, "item"):  # numpy scalar
-            return x.item()
-    except Exception:
-        pass
-    if isinstance(x, (list, tuple)):
-        return [_to_py(v) for v in x]
-    if isinstance(x, dict):
-        return {k: _to_py(v) for k, v in x.items()}
-    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-        return None
-    return x
-
-def _resp(status: int, body: Dict[str, Any], origin: str) -> Dict[str, Any]:
+def _resp(status, body):
     return {
         "statusCode": status,
-        "headers": _cors_headers(origin),
-        "body": json.dumps(_to_py(body)),
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": os.getenv("ALLOWED_ORIGIN", "*"),
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+        },
+        "body": json.dumps(body, ensure_ascii=False)
     }
 
-_MODEL = None
-def _load_model():
-    global _MODEL
-    if _MODEL is not None:
-        return _MODEL
-    try:
-        import joblib
-        model_path = os.path.join(os.path.dirname(__file__), "model", "clf.joblib")
-        if os.path.exists(model_path):
-            _MODEL = joblib.load(model_path)
-            return _MODEL
-    except Exception:
-        traceback.print_exc()
-    _MODEL = "fallback"
-    return _MODEL
-
-def _predict_proba(features: List[float]) -> List[float]:
-    m = _load_model()
-    try:
-        if m != "fallback":
-            proba = m.predict_proba([features])[0]
-            return [float(proba[0]), float(proba[1])]
-    except Exception:
-        traceback.print_exc()
-    s = sum(features) / max(len(features), 1)
-    p1 = 1.0 / (1.0 + math.exp(-0.01 * (s - 20.0)))
-    p0 = 1.0 - p1
-    return [float(p0), float(p1)]
-
-def predict(event, context):
-    headers = event.get("headers") or {}
-    origin = headers.get("origin") or headers.get("Origin") or "*"
-
-    if event.get("httpMethod") == "OPTIONS":
-        return {"statusCode": 204, "headers": _cors_headers(origin), "body": ""}
-
-    try:
-        body_raw = event.get("body") or "{}"
-        if event.get("isBase64Encoded"):
-            body_raw = base64.b64decode(body_raw).decode("utf-8")
-        data = json.loads(body_raw)
-
-        features = data.get("features")
-        if not isinstance(features, list) or len(features) != 30 or not all(isinstance(x, (int, float)) for x in features):
-            return _resp(400, {"error": "payload must be {'features': [30 numbers]}."}, origin)
-
-        proba = _predict_proba(features)  # [p0, p1]
-        if not isinstance(proba, (list, tuple)) or len(proba) != 2:
-            raise ValueError("invalid model output")
-
-        pred = 1 if float(proba[1]) >= 0.5 else 0
-        return _resp(200, {"predictions": [pred], "probabilities": [[float(proba[0]), float(proba[1])]]}, origin)
-
-    except Exception as e:
-        traceback.print_exc()
-        return _resp(500, {"error": "internal_error", "detail": str(e)}, origin)
+def _coerce_features(x):
+    """
+    Essaie de convertir chaque élément en float (accepte int, float, str numériques).
+    """
+    out = []
+    for v in x:
+        if isinstance(v, (int, float)):
+            out.append(float(v))
+        elif isinstance(v, str):
+            out.append(float(v.strip()))
+        else:
+            raise ValueError(f"Unsupported item type: {type(v).__name__}")
+    return out
 
 def health(event, context):
-    headers = event.get("headers") or {}
-    origin = headers.get("origin") or headers.get("Origin") or "*"
-    return _resp(200, {"ok": True}, origin)
+    return _resp(200, {"ok": True, "stage": os.getenv("STAGE", "dev")})
+
+def predict(event, context):
+    try:
+        raw = event.get("body") or ""
+        # log minimal pour aider au debug (tronqué)
+        print(f"[predict] isBase64Encoded={event.get('isBase64Encoded')} len(body)={len(raw)}")
+
+        if event.get("isBase64Encoded"):
+            raw = base64.b64decode(raw).decode("utf-8", "ignore")
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            print("[predict] invalid JSON body:", raw[:500])
+            return _resp(400, {"error": "invalid JSON"})
+
+        if not isinstance(data, dict) or "features" not in data:
+            return _resp(400, {"error": "payload must be {'features': [30 numbers]}."})
+
+        feats = data["features"]
+        if not isinstance(feats, list):
+            return _resp(400, {"error": "features must be an array"})
+
+        try:
+            feats = _coerce_features(feats)
+        except Exception as e:
+            return _resp(400, {"error": f"features must be numbers (convertible): {e}"} )
+
+        if len(feats) != 30:
+            return _resp(400, {"error": f"features must have length 30, got {len(feats)}"})
+
+        # Inference
+        if _MODEL is None:
+            # fallback déterministe pour ne pas casser le front/pipeline
+            # (ex: seuil sur une somme simple)
+            s = sum(feats)
+            pred = 1 if s % 2 > 1 else 0
+            proba = [1 - (s % 1), (s % 1)]
+        else:
+            import numpy as np
+            X = np.array(feats, dtype=float).reshape(1, -1)
+            pred = int(_MODEL.predict(X)[0])
+            if hasattr(_MODEL, "predict_proba"):
+                p = _MODEL.predict_proba(X)[0]
+                proba = [float(p[0]), float(p[1])]
+            else:
+                proba = [float(1 - pred), float(pred)]
+
+        return _resp(200, {"predictions": [pred], "probabilities": [proba]})
+
+    except Exception as e:
+        print("[predict] unexpected error:", e)
+        traceback.print_exc()
+        return _resp(500, {"error": "internal_error"})
