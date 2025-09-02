@@ -80,20 +80,20 @@ functions:
             origins: ${self:custom.allowedOrigins}
             headers: [ Content-Type ]
             allowCredentials: false
-          request:
-            schemas:
-              application/json:
-                name: PredictRequest
-                schema:
-                  type: object
-                  required: [features]
-                  properties:
-                    features:
-                      type: array
-                      minItems: 30
-                      maxItems: 30
-                      items:
-                        type: number
+         # request:
+         #   schemas:
+         #     application/json:
+         #       name: PredictRequest
+         #       schema:
+         #         type: object
+         #         required: [features]
+         #         properties:
+         #           features:
+         #             type: array
+         #             minItems: 30
+         #             maxItems: 30
+         #             items:
+         #               type: number
 
 resources:
   Outputs:
