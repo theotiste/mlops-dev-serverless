@@ -14,6 +14,7 @@ provider:
     lambda: true
   environment:
     STAGE: ${sls:stage}
+  # Réglages REST API (v1)
   apiGateway:
     minimumCompressionSize: 1024
   logs:
@@ -30,11 +31,11 @@ provider:
     Service: cancer-prediction-api
     Stage: ${sls:stage}
 
-# 🚫 On exclut TOUT par défaut, puis on inclut uniquement ce qui est nécessaire par fonction
+# Exclure tout par défaut
 package:
   individually: true
   patterns:
-    - '!**'                 # exclut tout par défaut
+    - '!**'
     - '!.git/**'
     - '!node_modules/**'
     - '!venv/**'
@@ -52,56 +53,63 @@ custom:
     - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
 
 functions:
-  # ➜ Fonction légère pour /health : uniquement handler.py
+  # /health : uniquement handler.py
   health:
     handler: handler.health
     package:
       patterns:
-        - 'handler.py'
+        - handler.py
     events:
-      - httpApi:
+      - http:
           path: health
           method: get
           cors: true
 
-  # ➜ Fonction /predict : handler + éventuel modèle .joblib (mais rien d’autre)
+  # /predict : handler + modèle
   predict:
     handler: handler.predict
     package:
       patterns:
-        - 'handler.py'
-        - 'model/*.joblib'     # ajuste si ton fichier a un autre nom/extension
+        - handler.py
+        - model/*.joblib
     timeout: 20
     events:
-      - httpApi:
+      - http:
           path: predict
           method: post
           cors:
             origins: ${self:custom.allowedOrigins}
-            headers: [ Content-Type ]
+            headers:
+              - Content-Type
             allowCredentials: false
           request:
             schemas:
               application/json:
-               name: PredictRequest
-               schema: ${file(schemas/predict.json)}
-  
-         # request:
-         #   schemas:
-         #     application/json:
-         #       name: PredictRequest
-         #       schema:
-         #         type: object
-         #         required: [features]
-         #         properties:
-         #           features:
-         #             type: array
-         #             minItems: 30
-         #             maxItems: 30
-         #             items:
-         #               type: number
+                name: PredictRequest
+                schema: ${file(schemas/predict.json)}
 
 resources:
+  # (Optionnel mais conseillé) CORS aussi sur erreurs 4XX/5XX côté Gateway
+  Resources:
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type'"
+    GatewayResponseDefault5XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseType: DEFAULT_5XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type'"
+
   Outputs:
     ServiceEndpoint:
       Description: REST API base URL
