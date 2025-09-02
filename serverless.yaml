@@ -14,8 +14,7 @@ provider:
     lambda: true
   environment:
     STAGE: ${sls:stage}
-
-  # ➜ REST API (API Gateway v1)
+  # ⇣ Options REST API (API Gateway v1)
   apiGateway:
     minimumCompressionSize: 1024
   logs:
@@ -24,17 +23,15 @@ provider:
       executionLogging: true
       level: INFO
       fullExecutionData: false
-
   deploymentBucket:
     blockPublicAccess: true
     serverSideEncryption: AES256
-
   tags:
     Project: mlops-breast-cancer
     Service: cancer-prediction-api
     Stage: ${sls:stage}
 
-# On exclut tout par défaut puis on inclut par fonction
+# on exclut tout par défaut, puis on inclut par fonction
 package:
   individually: true
   patterns:
@@ -56,28 +53,29 @@ custom:
     - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
 
 functions:
-  # -------- /health --------
+
+  # --- /health : uniquement handler.py (léger)
   health:
     handler: handler.health
     package:
       patterns:
         - handler.py
     events:
-      - http:
+      - http:               # REST API
           path: health
           method: get
           cors: true
 
-  # -------- /predict --------
+  # --- /predict : handler + modèle .joblib ; validation du body (REST)
   predict:
     handler: handler.predict
     package:
       patterns:
         - handler.py
-        - model/*.joblib      # adapte si ton fichier modèle a un autre nom/extension
+        - model/*.joblib      # adapte si le nom/extension diffère
     timeout: 20
     events:
-      - http:
+      - http:                 # REST API
           path: predict
           method: post
           cors:
@@ -85,9 +83,12 @@ functions:
             headers:
               - Content-Type
             allowCredentials: false
+          # ⚠️ Pour REST API la clé est 'request.schema' (au singulier)
           request:
-            schemas:
-              application/json: ${file(schemas/predict.json)}
+            schema:
+              application/json:
+                name: PredictRequest
+                schema: ${file(schemas/predict.json)}
 
 resources:
   Outputs:
@@ -102,7 +103,6 @@ resources:
             - Ref: AWS::Region
             - ".amazonaws.com/"
             - ${sls:stage}
-
     HealthUrl:
       Description: Healthcheck URL
       Value:
@@ -115,7 +115,6 @@ resources:
             - ".amazonaws.com/"
             - ${sls:stage}
             - "/health"
-
     PredictUrl:
       Description: Predict URL
       Value:
