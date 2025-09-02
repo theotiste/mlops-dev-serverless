@@ -80,6 +80,12 @@ functions:
             origins: ${self:custom.allowedOrigins}
             headers: [ Content-Type ]
             allowCredentials: false
+          request:
+            schemas:
+              application/json:
+               name: PredictRequest
+               schema: ${file(schemas/predict.json)}
+  
          # request:
          #   schemas:
          #     application/json:
