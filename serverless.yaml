@@ -14,8 +14,7 @@ provider:
     lambda: true
   environment:
     STAGE: ${sls:stage}
-  # ⇣ Options REST API (API Gateway v1)
-  apiGateway:
+  apiGateway:                # <- REST API (pas httpApi)
     minimumCompressionSize: 1024
   logs:
     restApi:
@@ -31,7 +30,7 @@ provider:
     Service: cancer-prediction-api
     Stage: ${sls:stage}
 
-# on exclut tout par défaut, puis on inclut par fonction
+# Exclure tout par défaut
 package:
   individually: true
   patterns:
@@ -54,28 +53,28 @@ custom:
 
 functions:
 
-  # --- /health : uniquement handler.py (léger)
+  # ---- /health
   health:
     handler: handler.health
     package:
       patterns:
         - handler.py
     events:
-      - http:               # REST API
+      - http:                 # REST
           path: health
           method: get
           cors: true
 
-  # --- /predict : handler + modèle .joblib ; validation du body (REST)
+  # ---- /predict
   predict:
     handler: handler.predict
     package:
       patterns:
         - handler.py
-        - model/*.joblib      # adapte si le nom/extension diffère
+        - model/*.joblib      # adapte si ton fichier a un autre nom/extension
     timeout: 20
     events:
-      - http:                 # REST API
+      - http:                 # REST
           path: predict
           method: post
           cors:
@@ -83,12 +82,11 @@ functions:
             headers:
               - Content-Type
             allowCredentials: false
-          # ⚠️ Pour REST API la clé est 'request.schema' (au singulier)
           request:
-            schema:
+            schemas:          # <-- REST = schemas (pluriel)
               application/json:
                 name: PredictRequest
-                schema: ${file(schemas/predict.json)}
+                schema: ${file(schemas/predict.json)}  # ton schema JSON (draft-04 OK)
 
 resources:
   Outputs:
