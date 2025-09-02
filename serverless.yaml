@@ -14,24 +14,26 @@ provider:
     lambda: true
   environment:
     STAGE: ${sls:stage}
-  # Réglages REST API (v1)
-  apiGateway:
-    minimumCompressionSize: 1024
-  logs:
-    restApi:
-      accessLogging: true
-      executionLogging: true
-      level: INFO
-      fullExecutionData: false
+
+  # --- HTTP API (API Gateway v2) ---
+  httpApi:
+    payload: '2.0'
+    cors:
+      allowedOrigins: ${self:custom.allowedOrigins}
+      allowedHeaders:
+        - Content-Type
+      allowCredentials: false
+
   deploymentBucket:
     blockPublicAccess: true
     serverSideEncryption: AES256
+
   tags:
     Project: mlops-breast-cancer
     Service: cancer-prediction-api
     Stage: ${sls:stage}
 
-# Exclure tout par défaut
+# On exclut tout par défaut, puis on inclut ce qu’il faut par fonction
 package:
   individually: true
   patterns:
@@ -53,71 +55,43 @@ custom:
     - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
 
 functions:
-  # /health : uniquement handler.py
+  # Santé
   health:
     handler: handler.health
     package:
       patterns:
         - handler.py
     events:
-      - http:
-          path: health
+      - httpApi:
+          path: /health
           method: get
-          cors: true
 
-  # /predict : handler + modèle
+  # Prédiction
   predict:
     handler: handler.predict
     package:
       patterns:
         - handler.py
-        - model/*.joblib
+        - model/*.joblib        # adapte si le nom/extension change
     timeout: 20
     events:
-      - http:
-          path: predict
+      - httpApi:
+          path: /predict
           method: post
-          cors:
-            origins: ${self:custom.allowedOrigins}
-            headers:
-              - Content-Type
-            allowCredentials: false
+          # Validation du corps côté API Gateway (HTTP API)
           request:
             schemas:
-              application/json:
-                name: PredictRequest
-                schema: ${file(schemas/predict.json)}
+              'application/json': ${file(schemas/predict.json)}
 
 resources:
-  # (Optionnel mais conseillé) CORS aussi sur erreurs 4XX/5XX côté Gateway
-  Resources:
-    GatewayResponseDefault4XX:
-      Type: AWS::ApiGateway::GatewayResponse
-      Properties:
-        ResponseType: DEFAULT_4XX
-        RestApiId:
-          Ref: ApiGatewayRestApi
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type'"
-    GatewayResponseDefault5XX:
-      Type: AWS::ApiGateway::GatewayResponse
-      Properties:
-        ResponseType: DEFAULT_5XX
-        RestApiId:
-          Ref: ApiGatewayRestApi
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type'"
-
   Outputs:
     ServiceEndpoint:
-      Description: REST API base URL
+      Description: HTTP API base URL
       Value:
         Fn::Join:
           - ""
           - - "https://"
-            - Ref: ApiGatewayRestApi
+            - Ref: HttpApi
             - ".execute-api."
             - Ref: AWS::Region
             - ".amazonaws.com/"
@@ -128,7 +102,7 @@ resources:
         Fn::Join:
           - ""
           - - "https://"
-            - Ref: ApiGatewayRestApi
+            - Ref: HttpApi
             - ".execute-api."
             - Ref: AWS::Region
             - ".amazonaws.com/"
@@ -140,7 +114,7 @@ resources:
         Fn::Join:
           - ""
           - - "https://"
-            - Ref: ApiGatewayRestApi
+            - Ref: HttpApi
             - ".execute-api."
             - Ref: AWS::Region
             - ".amazonaws.com/"
