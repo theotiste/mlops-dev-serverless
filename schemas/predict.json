@@ -1,12 +1,19 @@
 {
   "type": "object",
+  "additionalProperties": false,
   "required": ["features"],
   "properties": {
     "features": {
       "type": "array",
       "minItems": 30,
       "maxItems": 30,
-      "items": { "type": ["number","string"] }
+      "items": {
+        "oneOf": [
+          { "type": "number" },
+          { "type": "string", "pattern": "^-?\\d+(\\.\\d+)?$" }
+        ]
+      }
     }
   }
 }
+
