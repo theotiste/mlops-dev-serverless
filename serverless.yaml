@@ -59,7 +59,7 @@ functions:
       patterns:
         - 'handler.py'
     events:
-      - http:
+      - httpApi:
           path: health
           method: get
           cors: true
@@ -73,7 +73,7 @@ functions:
         - 'model/*.joblib'     # ajuste si ton fichier a un autre nom/extension
     timeout: 20
     events:
-      - http:
+      - httpApi:
           path: predict
           method: post
           cors:
