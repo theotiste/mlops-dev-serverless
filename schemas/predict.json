@@ -9,7 +9,7 @@
       "type": "array",
       "minItems": 30,
       "maxItems": 30,
-      "items": { "type": "number" }
+      "items": { "type": ["number", "integer"] }
     }
   }
 }
