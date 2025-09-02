@@ -1,4 +1,6 @@
 {
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "PredictRequest",
   "type": "object",
   "additionalProperties": false,
   "required": ["features"],
@@ -7,13 +9,7 @@
       "type": "array",
       "minItems": 30,
       "maxItems": 30,
-      "items": {
-        "oneOf": [
-          { "type": "number" },
-          { "type": "string", "pattern": "^-?\\d+(\\.\\d+)?$" }
-        ]
-      }
+      "items": { "type": "number" }
     }
   }
 }
-
