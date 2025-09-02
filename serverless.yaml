@@ -15,14 +15,15 @@ provider:
   environment:
     STAGE: ${sls:stage}
 
-  # --- HTTP API (API Gateway v2) ---
-  httpApi:
-    payload: '2.0'
-    cors:
-      allowedOrigins: ${self:custom.allowedOrigins}
-      allowedHeaders:
-        - Content-Type
-      allowCredentials: false
+  # ➜ REST API (API Gateway v1)
+  apiGateway:
+    minimumCompressionSize: 1024
+  logs:
+    restApi:
+      accessLogging: true
+      executionLogging: true
+      level: INFO
+      fullExecutionData: false
 
   deploymentBucket:
     blockPublicAccess: true
@@ -33,7 +34,7 @@ provider:
     Service: cancer-prediction-api
     Stage: ${sls:stage}
 
-# On exclut tout par défaut, puis on inclut ce qu’il faut par fonction
+# On exclut tout par défaut puis on inclut par fonction
 package:
   individually: true
   patterns:
@@ -55,66 +56,73 @@ custom:
     - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
 
 functions:
-  # Santé
+  # -------- /health --------
   health:
     handler: handler.health
     package:
       patterns:
         - handler.py
     events:
-      - httpApi:
-          path: /health
+      - http:
+          path: health
           method: get
+          cors: true
 
-  # Prédiction
+  # -------- /predict --------
   predict:
     handler: handler.predict
     package:
       patterns:
         - handler.py
-        - model/*.joblib        # adapte si le nom/extension change
+        - model/*.joblib      # adapte si ton fichier modèle a un autre nom/extension
     timeout: 20
     events:
-      - httpApi:
-          path: /predict
+      - http:
+          path: predict
           method: post
-          # Validation du corps côté API Gateway (HTTP API)
+          cors:
+            origins: ${self:custom.allowedOrigins}
+            headers:
+              - Content-Type
+            allowCredentials: false
           request:
             schemas:
-              'application/json': ${file(schemas/predict.json)}
+              application/json: ${file(schemas/predict.json)}
 
 resources:
   Outputs:
     ServiceEndpoint:
-      Description: HTTP API base URL
+      Description: REST API base URL
       Value:
         Fn::Join:
           - ""
           - - "https://"
-            - Ref: HttpApi
+            - Ref: ApiGatewayRestApi
             - ".execute-api."
             - Ref: AWS::Region
             - ".amazonaws.com/"
             - ${sls:stage}
+
     HealthUrl:
       Description: Healthcheck URL
       Value:
         Fn::Join:
           - ""
           - - "https://"
-            - Ref: HttpApi
+            - Ref: ApiGatewayRestApi
             - ".execute-api."
             - Ref: AWS::Region
             - ".amazonaws.com/"
             - ${sls:stage}
             - "/health"
+
     PredictUrl:
       Description: Predict URL
       Value:
         Fn::Join:
           - ""
           - - "https://"
-            - Ref: HttpApi
+            - Ref: ApiGatewayRestApi
             - ".execute-api."
             - Ref: AWS::Region
             - ".amazonaws.com/"
