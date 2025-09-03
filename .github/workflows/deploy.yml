@@ -1,213 +1,127 @@
-name: deploy-dev
+name: Deploy & Smoke-test (serverless)
 
 on:
   push:
-    branches: [ "main" ]
-    paths:
-      - "serverless.yml"
-      - "serverless.yaml"
-      - "handler.py"
-      - "features_input.json"
-      - "form_validated.html"
-      - "result.html"
-      - "index.html"
-      - ".github/workflows/deploy.yml"
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       stage:
-        description: "Stage"
+        description: "Serverless stage"
         default: "dev"
+        required: true
       region:
         description: "AWS region"
         default: "eu-west-3"
-
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  id-token: write
-  contents: read
+        required: true
 
 env:
-  STAGE: ${{ github.event.inputs.stage || 'dev' }}
-  AWS_REGION: ${{ github.event.inputs.region || 'eu-west-3' }}
-  SERVICE_NAME: cancer-prediction-api
   SLS_TELEMETRY_DISABLED: "1"
-  FRONTEND_API_URL: ${{ secrets.FRONTEND_API_URL }}
-  HEALTH_URL: ${{ secrets.HEALTH_URL }}
+  NODE_OPTIONS: "--max-old-space-size=4096"
 
 jobs:
-  deploy-backend:
+  deploy-and-test:
+    name: Deploy and smoke-test
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # pour OIDC (recommandé)
+      contents: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
 
-      - name: Install Serverless CLI
-        run: npm i -g serverless@^4
+      - name: Install Serverless v4
+        run: npm i -g serverless@4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      # --- Auth AWS (choisis UNE des 2 options) ---
+      # Option A: via OIDC (recommandé) — remplace <ACCOUNT_ID> et <ROLE_NAME>
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ !secrets.AWS_ACCESS_KEY_ID }}
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          python-version: "3.12"
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME_FOR_GHA>
+          aws-region: ${{ inputs.region || 'eu-west-3' }}
 
-      - name: Install jq
-        run: |
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
-          jq --version
-
-      - name: Configure AWS credentials
+      # Option B: via clés (fallback) — ajoute secrets dans ton repo
+      - name: Configure AWS credentials (static keys)
+        if: ${{ secrets.AWS_ACCESS_KEY_ID }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ inputs.region || 'eu-west-3' }}
 
-      - name: Validate Serverless config
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+      - name: Serverless package (dry build)
+        run: |
+          sls package \
+            --stage "${{ inputs.stage || 'dev' }}" \
+            --region "${{ inputs.region || 'eu-west-3' }}" \
+            --verbose
+
+      - name: Serverless deploy
+        run: |
+          sls deploy \
+            --stage "${{ inputs.stage || 'dev' }}" \
+            --region "${{ inputs.region || 'eu-west-3' }}"
+
+      - name: Resolve endpoints from CloudFormation Outputs
+        id: endpoints
         shell: bash
         run: |
           set -euo pipefail
+          REGION="${{ inputs.region || 'eu-west-3' }}"
+          STAGE="${{ inputs.stage || 'dev' }}"
+          STACK="cancer-prediction-api-$STAGE"
 
-          echo "::group::Repo tree (top-level)"
-          ls -la
-          echo "::endgroup::"
+          BASE_URL="$(aws cloudformation describe-stacks \
+            --region "$REGION" --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceEndpoint'].OutputValue" \
+            --output text)"
 
-          # Détecte et force le bon fichier de config
-          CONFIG=""
-          if [ -f serverless.yml ];  then CONFIG="serverless.yml";  fi
-          if [ -f serverless.yaml ]; then CONFIG="serverless.yaml"; fi
+          echo "BASE_URL=$BASE_URL"
+          echo "HEALTH_URL=$BASE_URL/health"       | tee -a "$GITHUB_ENV"
+          echo "PREDICT_URL=$BASE_URL/predict"     | tee -a "$GITHUB_ENV"
 
-          if [ -z "$CONFIG" ]; then
-            echo "❌ Aucun serverless.(yml|yaml) trouvé à la racine du repo."
-            exit 1
-          fi
-
-          echo "Using Serverless config: $CONFIG"
-          echo "::group::serverless print output"
-          # NE PAS /dev/null : on affiche l’erreur réelle si ça casse
-          serverless print --config "$CONFIG" --stage "$STAGE" --region "$AWS_REGION" || {
-            echo "---- Contenu du fichier $CONFIG (pour debug) ----"
-            sed -n '1,200p' "$CONFIG" || true
-            echo "-----------------------------------------------"
-            exit 1
-          }
-          echo "::endgroup::"
-        
-
-      - name: Deploy
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
-
-      - name: Fetch API base URL (sls info)
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          serverless info --stage "$STAGE" --region "$AWS_REGION" > sls-info.txt || true
-          cat sls-info.txt || true 
-          
-      - name: Resolve endpoints (health & predict)
-        id: resolve
+      - name: Smoke test - /health
         shell: bash
         run: |
           set -euo pipefail
+          code="$(curl -sS -o health.json -w '%{http_code}\n' "$HEALTH_URL")"
+          echo "HTTP /health: $code"
+          cat health.json || true
+          [ "$code" = "200" ] || { echo "Healthcheck failed"; exit 1; }
 
-          HEALTH=""
-          PRED=""
-
-          # 1) Essayer de lire directement depuis sls-info.txt
-          if [ -f sls-info.txt ]; then
-            HEALTH=$(grep -Eo 'GET - https://[^ ]+/health' sls-info.txt | awk '{print $3}' | head -1 || true)
-            PRED=$(  grep -Eo 'POST - https://[^ ]+/predict' sls-info.txt | awk '{print $3}' | head -1 || true)
-          fi
-
-          # 2) Sinon, tenter via les sorties CloudFormation
-          if [ -z "${HEALTH}" ] || [ -z "${PRED}" ]; then
-            outs=$(aws cloudformation describe-stacks \
-                     --stack-name "${SERVICE_NAME}-${STAGE}" \
-                     --region "$AWS_REGION" \
-                     --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" \
-                     --output text 2>/dev/null || true)
-            if [ -z "${HEALTH}" ]; then
-              HEALTH=$(printf "%s\n" "$outs" | awk '$1=="HealthUrl"{print $2}' | head -1 || true)
-            fi
-            if [ -z "${PRED}" ]; then
-              PRED=$(printf "%s\n" "$outs" | awk '$1=="PredictUrl"{print $2}' | head -1 || true)
-            fi
-          fi
-
-          # 3) Dernier recours : dériver /predict depuis /health
-          if [ -z "${PRED}" ] && [ -n "${HEALTH}" ]; then
-            root="${HEALTH%/health}"
-            PRED="${root%/}/predict"
-          fi
-
-          # 4) Vérifications
-          [ -n "${HEALTH}" ] || { echo "❌ No HEALTH URL resolved"; exit 1; }
-          [ -n "${PRED}" ]   || { echo "❌ No PREDICT URL resolved"; exit 1; }
-
-          echo "HEALTH_URL_RESOLVED=$HEALTH" | tee -a "$GITHUB_ENV"
-          echo "PREDICT_URL_RESOLVED=$PRED" | tee -a "$GITHUB_ENV"
-
-          echo "::notice title=Resolved URLs::HEALTH=$HEALTH | PREDICT=$PRED"
-
-     
-
-      - name: Smoke test /health
+      - name: Prepare payload from features_input.json
         shell: bash
         run: |
           set -euo pipefail
-          url="${HEALTH_URL_RESOLVED:?missing}"
-          ok=false
-          for i in {1..6}; do
-            code=$(curl -sS -m 12 -o /tmp/b.txt -w "%{http_code}" "$url" || true)
-            echo "::group::Attempt $i -> ${code}"; sed -e 's/^/| /' /tmp/b.txt; echo "::endgroup::"
-            if [ "$code" = "200" ] || [ "$code" = "204" ]; then ok=true; break; fi
-            sleep $((i*5))
-          done
-          [ "$ok" = "true" ]
+          jq '{features: (.features // . | map(tonumber))}' features_input.json > payload.json
+          # sanity-check strict
+          jq '(.features|type=="array") and (.features|length==30) and (all(.features[]; type=="number"))' payload.json | grep -q true
 
-          
-      
-      - name: Smoke test /predict (optional)
-
-        if: ${{ hashFiles('features_input.json') != '' }}
+      - name: Smoke test - /predict
         shell: bash
         run: |
           set -euo pipefail
-          PRED="${PREDICT_URL_RESOLVED:?missing PREDICT_URL_RESOLVED}"
-          echo "Predict URL: $PRED"
+          code="$(curl -sS -o predict.json -w '%{http_code}\n' \
+            -H 'Content-Type: application/json' \
+            --data-binary @payload.json "$PREDICT_URL")"
+          echo "HTTP /predict: $code"
+          jq -e '.predictions or .probabilities or .prediction or .result' predict.json >/dev/null
+          [ "$code" = "200" ] || { echo "Predict failed (HTTP $code)"; cat predict.json; exit 1; }
+          jq . predict.json
 
-          # on récupère le code HTTP et on garde le corps pour debug
-          code=$(curl -sS -o predict-response.json -w "%{http_code}" \
-                 -H "Content-Type: application/json" \
-                 -d @features_input.json "$PRED" || true)
-
-          echo "::group::/predict response (HTTP $code)"
-          cat predict-response.json || true
-          echo "::endgroup::"
-
-          # on échoue si pas 200 ou si le JSON ne contient pas un des champs attendus
-          [ "$code" = "200" ] || { echo "HTTP $code from $PRED"; exit 1; }
-          jq -e '.predictions or .probabilities or .prediction or .result' predict-response.json >/dev/null
-
-
-       
-      - name: Upload sls info
+      - name: Upload smoke artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: sls-info
+          name: smoke-artifacts
           path: |
-            sls-info.txt
-            predict-response.json
-          if-no-files-found: ignore
-          retention-days: 7
+            health.json
+            payload.json
+            predict.json
