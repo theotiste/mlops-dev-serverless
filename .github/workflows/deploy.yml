@@ -1,72 +1,54 @@
-service: cancer-prediction-api
+name: Deploy backend (Serverless + OIDC)
 
-frameworkVersion: ">=4.18.0 <5.0.0"
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "serverless.yaml"
+      - "handler.py"
+      - "schemas/**"
+      - "model-layer/**"
+      - ".github/workflows/deploy.yml"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
 
-plugins:
-  - serverless-prune-plugin
+permissions:
+  id-token: write
+  contents: read
 
-custom:
-  prune:
-    automatic: true
-    number: 3
+env:
+  AWS_REGION: eu-west-3
+  STAGE: dev
+  SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
 
-provider:
-  name: aws
-  runtime: python3.12
-  region: ${opt:region, 'eu-west-3'}
-  stage: ${opt:stage, 'dev'}
-  memorySize: 512
-  timeout: 20
-  environment:
-    STAGE: ${self:provider.stage}
-  iam:
-    role:
-      statements:
-        - Effect: Allow
-          Action:
-            - logs:CreateLogGroup
-            - logs:CreateLogStream
-            - logs:PutLogEvents
-          Resource: "*"
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-package:
-  patterns:
-    - handler.py
-    - model-layer/**        # adapte à ton projet
-    - '!**/*.pyc'
-    - '!**/__pycache__/**'
-    - '!*.venv/**'
-    - '!venv/**'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
 
-functions:
-  health:
-    handler: handler.health
-    package:
-      patterns:
-        - handler.py
-    events:
-      - http:
-          path: health
-          method: get
-          cors: true
+      - name: Install Node deps
+        run: npm ci || npm i
 
-  predict:
-    handler: handler.predict
-    package:
-      patterns:
-        - handler.py
-        - model-layer/**
-    events:
-      - http:
-          path: predict
-          method: post
-          cors:
-            origins: "*"
-            headers:
-              - Content-Type
-            allowCredentials: false
-          request:
-            schemas:
-              application/json:
-                name: PredictRequest
-                schema: ${file(schemas/predict.json)}
+      - name: Install Serverless CLI v4
+        run: npm i -g serverless@^4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
+          role-session-name: sls-deploy
+
+      - name: Print resolved Serverless config
+        run: serverless print --stage "$STAGE" --region "$AWS_REGION"
+
+      - name: Deploy
+        run: serverless deploy --stage "$STAGE" --region "$AWS_REGION"
