@@ -1,21 +1,24 @@
-name: Deploy Serverless API
+name: Deploy backend (Serverless + OIDC)
 
 on:
   push:
     branches: [ main ]
     paths:
-      - "serverless.yaml"
-      - "handler.py"
-      - "schemas/**"
-      - ".github/workflows/deploy.yml"
+      - 'serverless.yaml'
+      - 'handler.py'
+      - 'schemas/**'
+      - 'model-layer/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
 
 permissions:
+  id-token: write   # indispensable pour OIDC
   contents: read
-  id-token: write   # requis si tu utilises OIDC (role-to-assume)
 
 env:
   AWS_REGION: eu-west-3
   STAGE: dev
+  STACK: cancer-prediction-api-${{ env.STAGE }}
 
 jobs:
   deploy:
@@ -25,35 +28,64 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node (for Serverless)
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      - name: Install Serverless
-        run: npm i -g serverless@4
-
-      - name: Setup Python (facultatif, pour packager des deps)
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.10'
 
-      # ============= OPTION A : clés d’accès (les plus simples) =============
-      - name: Configure AWS credentials (keys)
-        if: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Install Python deps
+        if: hashFiles('requirements.txt') != ''
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer  # <- TON ARN
+          role-session-name: gha-mlops-serverless
 
-      # ============= OPTION B : OIDC + rôle IAM (recommandé) ================
-      # Décommente si tu as un rôle (et commente l'étape Option A)
-      # - name: Configure AWS credentials (OIDC)
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-      #     aws-region:     ${{ env.AWS_REGION }}
+      - name: Who am I?
+        run: aws sts get-caller-identity
 
-      - name: Deploy with Serverless
-        run: sls deploy --region "$AWS_REGION" --stage "$STAGE"
+      - name: Install Serverless
+        run: |
+          npm i -g serverless@4
+          sls --version
+
+      - name: Validate Serverless config
+        run: sls print --stage "$STAGE" --region "$AWS_REGION" > .sls.out.yml
+
+      - name: Deploy
+        run: sls deploy --stage "$STAGE" --region "$AWS_REGION"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          BASE_URL=$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceEndpoint'].OutputValue" \
+            --output text)
+          echo "Base URL: $BASE_URL"
+          HEALTH_URL="$BASE_URL/health"
+          PREDICT_URL="$BASE_URL/predict"
+
+          # Health 200
+          curl -sS "$HEALTH_URL" | jq .
+
+          # Payload propre (30 nombres)
+          jq '{features: (.features // . | map(tonumber))}' features_input.json > payload.json
+          jq '(.features|type)=="array" and (.features|length==30) and (all(.features[]; type=="number"))' payload.json
+
+          # Predict 200
+          curl -sS -H "Content-Type: application/json" --data-binary @payload.json "$PREDICT_URL" | jq .
