@@ -1,53 +1,28 @@
-name: Deploy backend (Serverless + OIDC)
-
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'serverless.yaml'
-      - 'handler.py'
-      - 'requirements.txt'
-      - 'model-layer/**'
-      - '.github/workflows/deploy.yml'
-  workflow_dispatch:
-    inputs:
-      stage:
-        description: "Serverless stage"
-        required: true
-        default: "dev"
-        type: string
-      region:
-        description: "AWS region"
-        required: true
-        default: "eu-west-3"
-        type: string
-
-# ⚠️ Pas d'expressions ici : que des littéraux éventuels
-env:
-  STAGE: dev
-  AWS_REGION: eu-west-3
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # OIDC
+      id-token: write
       contents: read
+
+    # ⬇️ injecte la clé pour toutes les étapes du job
+    env:
+      SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Résout les valeurs finales et variables dérivées
       - name: Resolve env and derived vars
         shell: bash
         run: |
           STAGE="${{ inputs.stage || env.STAGE }}"
           REGION="${{ inputs.region || env.AWS_REGION }}"
-          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
-          echo "AWS_REGION=$REGION" >> "$GITHUB_ENV"
+          echo "STAGE=$STAGE"        >> "$GITHUB_ENV"
+          echo "AWS_REGION=$REGION"  >> "$GITHUB_ENV"
           echo "STACK=cancer-prediction-api-$STAGE" >> "$GITHUB_ENV"
-          echo "Resolved: STAGE=$STAGE REGION=$REGION STACK=cancer-prediction-api-$STAGE"
+          # Sanity: la clé Serverless doit être présente
+          [ -n "$SERVERLESS_ACCESS_KEY" ] || { echo "::error::SERVERLESS_ACCESS_KEY absent"; exit 1; }
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -88,10 +63,3 @@ jobs:
 
       - name: Show endpoints
         run: sls info --stage "$STAGE" --region "$AWS_REGION"
-
-      # (Optionnel) mini smoke test
-      - name: Smoke test /health
-        run: |
-          URL=$(sls info --stage "$STAGE" --region "$AWS_REGION" | awk '/GET - /{print $3}')
-          echo "Health URL: $URL"
-          curl -sS "$URL" | jq .
