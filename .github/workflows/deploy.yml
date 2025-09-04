@@ -1,105 +1,72 @@
-name: Deploy backend (Serverless + OIDC)
+service: cancer-prediction-api
 
-on:
-  # Déclenchement manuel depuis l’onglet “Actions”
-  workflow_dispatch:
-    inputs:
-      stage:
-        description: "Serverless stage (ex: dev, prod)"
-        required: false
-        default: "dev"
-      region:
-        description: "AWS region"
-        required: false
-        default: "eu-west-3"
-  # (optionnel) déploiement automatique sur push main
-  push:
-    branches: ["main"]
-    paths:
-      - "serverless.yaml"
-      - "handler.py"
-      - "model-layer/**"
-      - ".github/workflows/deploy.yml"
+frameworkVersion: ">=4.18.0 <5.0.0"
 
-# Valeurs par défaut (peuvent être écrasées par workflow_dispatch)
-env:
-  AWS_REGION: eu-west-3
-  STAGE: dev
+plugins:
+  - serverless-prune-plugin
 
-jobs:
-  deploy:
-    name: Serverless deploy
-    runs-on: ubuntu-latest
+custom:
+  prune:
+    automatic: true
+    number: 3
 
-    # Requis pour OIDC (assume-role)
-    permissions:
-      id-token: write
-      contents: read
+provider:
+  name: aws
+  runtime: python3.12
+  region: ${opt:region, 'eu-west-3'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
+  timeout: 20
+  environment:
+    STAGE: ${self:provider.stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: "*"
 
-    # Empêche 2 déploiements concurrents sur la même branche
-    concurrency: ${{ github.workflow }}-${{ github.ref_name }}
+package:
+  patterns:
+    - handler.py
+    - model-layer/**        # adapte à ton projet
+    - '!**/*.pyc'
+    - '!**/__pycache__/**'
+    - '!*.venv/**'
+    - '!venv/**'
 
-    # Injecte la clé Serverless (Dashboard) pour v4
-    env:
-      SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+functions:
+  health:
+    handler: handler.health
+    package:
+      patterns:
+        - handler.py
+    events:
+      - http:
+          path: health
+          method: get
+          cors: true
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Résoudre les variables (inputs -> env)
-        shell: bash
-        run: |
-          # merge inputs->env (avec défauts)
-          STAGE="${{ github.event.inputs.stage || env.STAGE }}"
-          REGION="${{ github.event.inputs.region || env.AWS_REGION }}"
-          echo "STAGE=$STAGE"       >> "$GITHUB_ENV"
-          echo "AWS_REGION=$REGION" >> "$GITHUB_ENV"
-          echo "STACK=cancer-prediction-api-$STAGE" >> "$GITHUB_ENV"
-
-          # Sanity checks
-          if [ -z "$SERVERLESS_ACCESS_KEY" ]; then
-            echo "::error::Le secret SERVERLESS_ACCESS_KEY est manquant (Settings > Secrets > Actions)."
-            exit 1
-          fi
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          npm i -g serverless@4
-          serverless --version
-
-      - name: Print resolved Serverless config
-        run: serverless print --stage "$STAGE" --region "$AWS_REGION"
-
-      - name: Deploy
-        env:
-          SLS_TELEMETRY_DISABLE: "1"
-        run: serverless deploy --stage "$STAGE" --region "$AWS_REGION" --conceal
-
-      - name: Show endpoints
-        run: serverless info --stage "$STAGE" --region "$AWS_REGION"
+  predict:
+    handler: handler.predict
+    package:
+      patterns:
+        - handler.py
+        - model-layer/**
+    events:
+      - http:
+          path: predict
+          method: post
+          cors:
+            origins: "*"
+            headers:
+              - Content-Type
+            allowCredentials: false
+          request:
+            schemas:
+              application/json:
+                name: PredictRequest
+                schema: ${file(schemas/predict.json)}
