@@ -7,3 +7,8 @@ node_modules/
 out/
 img/
 *.zip
+sls.out.yml
+payload.json
+predict-response.json
+sls-deployer-policy.json
+trust-policy.json
