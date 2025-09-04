@@ -1,80 +1,84 @@
 service: cancer-prediction-api
-frameworkVersion: "4"
-configValidationMode: error
+frameworkVersion: ">=4.0.0"
 
 provider:
   name: aws
   runtime: python3.12
   region: ${opt:region, 'eu-west-3'}
   stage: ${opt:stage, 'dev'}
-  memorySize: 512
-  timeout: 15
-  logRetentionInDays: 14
+  architecture: x86_64               # arm64 possible si tes libs natives supportent
+  logRetentionInDays: 14             # rétention des logs Lambda
   tracing:
     lambda: true
   environment:
-    STAGE: ${sls:stage}
-  apiGateway:                # <- REST API (pas httpApi)
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: INFO
+  apiGateway:                         # REST API (pas HTTP API)
     minimumCompressionSize: 1024
-  logs:
-    restApi:
-      accessLogging: true
-      executionLogging: true
-      level: INFO
-      fullExecutionData: false
-  deploymentBucket:
-    blockPublicAccess: true
-    serverSideEncryption: AES256
+    shouldStartNameWithService: true
+    metrics: false                    # évite la création d’un rôle/log group API Gateway
   tags:
-    Project: mlops-breast-cancer
-    Service: cancer-prediction-api
-    Stage: ${sls:stage}
+    project: cancer-prediction
+    stack: ${self:service}-${self:provider.stage}
+  stackTags:
+    project: cancer-prediction
+    stage: ${self:provider.stage}
 
-# Exclure tout par défaut
 package:
   individually: true
-  patterns:
-    - '!**'
-    - '!.git/**'
-    - '!node_modules/**'
-    - '!venv/**'
-    - '!train-venv/**'
-    - '!model-layer/**'
-    - '!**/__pycache__/**'
-    - '!**/*.ipynb'
-    - '!**/*.csv'
-    - '!**/*.parquet'
-    - '!**/*.md'
+  patterns:                           # inclusions/exclusions prudentes
+    - "!**/.git/**"
+    - "!**/.venv/**"
+    - "!**/venv/**"
+    - "!**/node_modules/**"
+    - "!**/.serverless/**"
+    - "!train-venv/**"
+    - "!slim-venv/**"
+    - "!**/*.ipynb"
+    - "!**/*.csv"
+    - "!**/*.md"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.gif"
 
 custom:
-  allowedOrigins:
-    - https://form.mlopstheotiste.fr
-    - ${env:AMPLIFY_URL, 'https://main.d1s8fkj9in84k5.amplifyapp.com'}
+  allowedOrigins:                     # CORS – ajuste si tu as un domaine spécifique
+    - "*"
+  prune:
+    automatic: true
+    number: 3
+
+plugins:
+  - serverless-prune-plugin
 
 functions:
-
-  # ---- /health
+  # ---- /health --------------------------------------------------------------
   health:
     handler: handler.health
+    memorySize: 256
+    timeout: 5
     package:
       patterns:
         - handler.py
     events:
-      - http:                 # REST
+      - http:
           path: health
           method: get
-          cors: true
+          cors: true                 # CORS simple pour un GET
 
-  # ---- /predict
+  # ---- /predict -------------------------------------------------------------
   predict:
     handler: handler.predict
+    memorySize: 1024
+    timeout: 20
     package:
       patterns:
         - handler.py
-        - model/*.joblib      # adapte si ton fichier a un autre nom/extension
-    timeout: 20
+        - "schemas/**"               # pour la validation du corps
+        - "*.pkl"                    # si tu embarques un modèle .pkl à la racine
+        - "model/**"                 # ou un dossier model/
     events:
-      - http:                 # REST
+      - http:
           path: predict
           method: post
           cors:
@@ -83,11 +87,13 @@ functions:
               - Content-Type
             allowCredentials: false
           request:
-            schemas:          # <-- REST = schemas (pluriel)
+            schemas:                 # REST = 'schemas' (pluriel)
               application/json:
                 name: PredictRequest
-                schema: ${file(schemas/predict.json)}  # ton schema JSON (draft-04 OK)
+                schema: ${file(schemas/predict.json)}
+                # Le schéma attendu : { "features": [ <30 nombres> ] }
 
+# ---- Sorties CloudFormation utiles -----------------------------------------
 resources:
   Outputs:
     ServiceEndpoint:
@@ -101,6 +107,7 @@ resources:
             - Ref: AWS::Region
             - ".amazonaws.com/"
             - ${sls:stage}
+
     HealthUrl:
       Description: Healthcheck URL
       Value:
@@ -113,6 +120,7 @@ resources:
             - ".amazonaws.com/"
             - ${sls:stage}
             - "/health"
+
     PredictUrl:
       Description: Predict URL
       Value:
