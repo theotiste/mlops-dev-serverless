@@ -34,11 +34,15 @@ jobs:
         with:
           node-version: 18
 
-      - name: Install Node deps
-        run: npm ci || npm i
+      - name: Install Node deps (plugins Serverless)
+        run: |
+          npm ci || npm i
 
       - name: Install Serverless CLI v4
         run: npm i -g serverless@^4
+
+      - name: Show Serverless version
+        run: serverless --version
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -49,6 +53,9 @@ jobs:
 
       - name: Print resolved Serverless config
         run: serverless print --stage "$STAGE" --region "$AWS_REGION"
+
+      - name: Package
+        run: serverless package --stage "$STAGE" --region "$AWS_REGION"
 
       - name: Deploy
         run: serverless deploy --stage "$STAGE" --region "$AWS_REGION"
