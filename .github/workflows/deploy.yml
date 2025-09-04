@@ -1,127 +1,59 @@
-name: Deploy & Smoke-test (serverless)
+name: Deploy Serverless API
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      stage:
-        description: "Serverless stage"
-        default: "dev"
-        required: true
-      region:
-        description: "AWS region"
-        default: "eu-west-3"
-        required: true
+    paths:
+      - "serverless.yaml"
+      - "handler.py"
+      - "schemas/**"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  contents: read
+  id-token: write   # requis si tu utilises OIDC (role-to-assume)
 
 env:
-  SLS_TELEMETRY_DISABLED: "1"
-  NODE_OPTIONS: "--max-old-space-size=4096"
+  AWS_REGION: eu-west-3
+  STAGE: dev
 
 jobs:
-  deploy-and-test:
-    name: Deploy and smoke-test
+  deploy:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write   # pour OIDC (recommandé)
-      contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node (for Serverless)
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Serverless v4
+      - name: Install Serverless
         run: npm i -g serverless@4
 
-      # --- Auth AWS (choisis UNE des 2 options) ---
-      # Option A: via OIDC (recommandé) — remplace <ACCOUNT_ID> et <ROLE_NAME>
-      - name: Configure AWS credentials (OIDC)
-        if: ${{ !secrets.AWS_ACCESS_KEY_ID }}
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Setup Python (facultatif, pour packager des deps)
+        uses: actions/setup-python@v5
         with:
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME_FOR_GHA>
-          aws-region: ${{ inputs.region || 'eu-west-3' }}
+          python-version: "3.12"
 
-      # Option B: via clés (fallback) — ajoute secrets dans ton repo
-      - name: Configure AWS credentials (static keys)
-        if: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      # ============= OPTION A : clés d’accès (les plus simples) =============
+      - name: Configure AWS credentials (keys)
+        if: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ inputs.region || 'eu-west-3' }}
+          aws-region:            ${{ env.AWS_REGION }}
 
-      - name: Serverless package (dry build)
-        run: |
-          sls package \
-            --stage "${{ inputs.stage || 'dev' }}" \
-            --region "${{ inputs.region || 'eu-west-3' }}" \
-            --verbose
+      # ============= OPTION B : OIDC + rôle IAM (recommandé) ================
+      # Décommente si tu as un rôle (et commente l'étape Option A)
+      # - name: Configure AWS credentials (OIDC)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      #     aws-region:     ${{ env.AWS_REGION }}
 
-      - name: Serverless deploy
-        run: |
-          sls deploy \
-            --stage "${{ inputs.stage || 'dev' }}" \
-            --region "${{ inputs.region || 'eu-west-3' }}"
-
-      - name: Resolve endpoints from CloudFormation Outputs
-        id: endpoints
-        shell: bash
-        run: |
-          set -euo pipefail
-          REGION="${{ inputs.region || 'eu-west-3' }}"
-          STAGE="${{ inputs.stage || 'dev' }}"
-          STACK="cancer-prediction-api-$STAGE"
-
-          BASE_URL="$(aws cloudformation describe-stacks \
-            --region "$REGION" --stack-name "$STACK" \
-            --query "Stacks[0].Outputs[?OutputKey=='ServiceEndpoint'].OutputValue" \
-            --output text)"
-
-          echo "BASE_URL=$BASE_URL"
-          echo "HEALTH_URL=$BASE_URL/health"       | tee -a "$GITHUB_ENV"
-          echo "PREDICT_URL=$BASE_URL/predict"     | tee -a "$GITHUB_ENV"
-
-      - name: Smoke test - /health
-        shell: bash
-        run: |
-          set -euo pipefail
-          code="$(curl -sS -o health.json -w '%{http_code}\n' "$HEALTH_URL")"
-          echo "HTTP /health: $code"
-          cat health.json || true
-          [ "$code" = "200" ] || { echo "Healthcheck failed"; exit 1; }
-
-      - name: Prepare payload from features_input.json
-        shell: bash
-        run: |
-          set -euo pipefail
-          jq '{features: (.features // . | map(tonumber))}' features_input.json > payload.json
-          # sanity-check strict
-          jq '(.features|type=="array") and (.features|length==30) and (all(.features[]; type=="number"))' payload.json | grep -q true
-
-      - name: Smoke test - /predict
-        shell: bash
-        run: |
-          set -euo pipefail
-          code="$(curl -sS -o predict.json -w '%{http_code}\n' \
-            -H 'Content-Type: application/json' \
-            --data-binary @payload.json "$PREDICT_URL")"
-          echo "HTTP /predict: $code"
-          jq -e '.predictions or .probabilities or .prediction or .result' predict.json >/dev/null
-          [ "$code" = "200" ] || { echo "Predict failed (HTTP $code)"; cat predict.json; exit 1; }
-          jq . predict.json
-
-      - name: Upload smoke artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: smoke-artifacts
-          path: |
-            health.json
-            payload.json
-            predict.json
+      - name: Deploy with Serverless
+        run: sls deploy --region "$AWS_REGION" --stage "$STAGE"
