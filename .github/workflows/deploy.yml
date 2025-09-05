@@ -1,61 +1,68 @@
-name: Deploy backend (Serverless + OIDC)
+name: Deploy backend (Serverless + static AWS keys)
 
 on:
   push:
     branches: [ "main" ]
     paths:
+      - "serverless.yml"
       - "serverless.yaml"
       - "handler.py"
-      - "schemas/**"
       - "model-layer/**"
-      - ".github/workflows/deploy.yml"
+      - "schemas/**"
       - "package.json"
       - "package-lock.json"
+      - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
 env:
-  AWS_REGION: eu-west-3
+  AWS_REGION: ${{ secrets.AWS_REGION }}
   STAGE: dev
-  SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (static keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: "npm"
 
-      - name: Install Node deps (plugins Serverless)
+      - name: Install Node deps (plugins Serverless, etc.)
         run: |
-          npm ci || npm i
+          if [ -f package.json ]; then
+            npm ci
+          fi
 
-      - name: Install Serverless CLI v4
-        run: npm i -g serverless@^4
-
-      - name: Show Serverless version
-        run: serverless --version
-
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
-          role-session-name: sls-deploy
-
+      # Serverless v4 a besoin de la licence/clé d’accès
       - name: Print resolved Serverless config
-        run: serverless print --stage "$STAGE" --region "$AWS_REGION"
-
-      - name: Package
-        run: serverless package --stage "$STAGE" --region "$AWS_REGION"
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: |
+          npx -y serverless@4 print --stage "$STAGE" --region "$AWS_REGION"
 
       - name: Deploy
-        run: serverless deploy --stage "$STAGE" --region "$AWS_REGION"
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: |
+          npx -y serverless@4 deploy --stage "$STAGE" --region "$AWS_REGION"
+
+      - name: Show endpoints
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: |
+          npx -y serverless@4 info --stage "$STAGE" --region "$AWS_REGION"
