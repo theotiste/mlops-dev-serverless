@@ -1,137 +1,277 @@
-service: cancer-prediction-api
-frameworkVersion: ">=4.0.0"
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Prédiction du cancer du sein</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <style>
+    :root {
+      --bg:#f5f7fb; --card:#fff; --text:#0f172a; --muted:#64748b;
+      --primary:#2563eb; --primary-dark:#1d4ed8; --danger:#b91c1c; --warn:#f59e0b;
+      --border:#cbd5e1;
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; padding:40px; background:var(--bg); color:var(--text);
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    }
+    h1 { text-align:center; margin-bottom:24px; }
+    .card {
+      max-width:1000px; margin:0 auto; background:var(--card); padding:24px;
+      border-radius:14px; box-shadow:0 8px 30px rgba(2,6,23,.08);
+    }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    @media (max-width:820px) { .grid { grid-template-columns:1fr; } }
+    label { font-weight:600; margin-bottom:6px; display:block; }
+    .field { display:flex; flex-direction:column; }
+    input[type="number"], input[type="text"]{
+      padding:10px; border:1px solid var(--border); border-radius:8px; font-size:15px;
+    }
+    input.invalid { border-color:var(--danger); outline: none; box-shadow:0 0 0 3px rgba(185,28,28,.12); }
+    .hint { color:var(--muted); font-size:12px; margin-top:4px; }
+    .actions { display:flex; gap:12px; justify-content:center; margin-top:22px; flex-wrap:wrap; }
+    button, .btn {
+      border:none; background:var(--primary); color:#fff; padding:10px 16px;
+      border-radius:10px; cursor:pointer; font-size:15px; text-decoration:none;
+    }
+    button:hover, .btn:hover { background:var(--primary-dark); }
+    .secondary { background:#e2e8f0; color:#111827; }
+    .secondary:hover { background:#cbd5e1; }
+    .note { text-align:center; color:var(--muted); font-size:13px; margin-top:8px; }
+    .error { text-align:center; color:var(--danger); margin-top:10px; }
+    .loading { opacity:.7; pointer-events:none; }
+    .small { font-size:12px; color:var(--muted); text-align:center; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h1>Prédiction du cancer du sein</h1>
 
-provider:
-  name: aws
-  runtime: python3.12
-  region: ${opt:region, 'eu-west-3'}
-  stage: ${opt:stage, 'dev'}
-  architecture: x86_64               # arm64 possible si tes libs natives supportent
-  logRetentionInDays: 14             # rétention des logs Lambda
-  tracing:
-    lambda: true
-  environment:
-    STAGE: ${self:provider.stage}
-    LOG_LEVEL: INFO
-  apiGateway:                         # REST API (pas HTTP API)
-    minimumCompressionSize: 1024
-    shouldStartNameWithService: true
-    metrics: false                    # évite la création d’un rôle/log group API Gateway
-  tags:
-    project: cancer-prediction
-    stack: ${self:service}-${self:provider.stage}
-  stackTags:
-    project: cancer-prediction
-    stage: ${self:provider.stage}
+  <div class="card">
+    <form id="prediction-form" novalidate>
+      <div class="grid" id="fields-container"></div>
 
-package:
-  individually: true
-  patterns:                           # inclusions/exclusions prudentes
-    - "!**/.git/**"
-    - "!**/.venv/**"
-    - "!**/venv/**"
-    - "!**/node_modules/**"
-    - "!**/.serverless/**"
-    - "!train-venv/**"
-    - "!slim-venv/**"
-    - "!**/*.ipynb"
-    - "!**/*.csv"
-    - "!**/*.md"
-    - "!**/*.png"
-    - "!**/*.jpg"
-    - "!**/*.gif"
+      <div class="actions">
+        <button type="submit" id="submit-btn">Lancer la prédiction</button>
+        <button type="reset"  class="secondary" id="reset-btn">Réinitialiser le formulaire</button>
+        <a class="btn secondary" href="/result.html" rel="noopener">Voir la page résultat</a>
+      </div>
+      <div class="note">Astuce&nbsp;: vous pouvez saisir des décimales avec <b>virgule</b> ou <b>point</b>.</div>
+      <div id="error-box" class="error" style="display:none;"></div>
+      <div class="small">
+        <span>API:&nbsp;<code id="api-label"></code></span>
+      </div>
+    </form>
+  </div>
 
-custom:
-  allowedOrigins:                     # CORS – ajuste si tu as un domaine spécifique
-    - "*"
-  prune:
-    automatic: true
-    number: 3
+  <script>
+    // ———————————————————————————————————————————————————————————————————
+    // 1) Configuration
+    // Par défaut on vise le domaine custom sécurisé derrière API Gateway.
+    const DEFAULT_API = "https://api.mlopstheotiste.fr/predict";
+    // Tu peux surcharger à la volée pour tester : form_validated.html?api=https://.../predict
+    const API_URL = new URLSearchParams(location.search).get("api") || DEFAULT_API;
+    document.getElementById("api-label").textContent = API_URL;
 
-plugins:
-  - serverless-prune-plugin
+    // Ordre EXACT des 30 features (doit correspondre au backend)
+    const FEATURE_ORDER = [
+      "radius_mean","texture_mean","perimeter_mean","area_mean","smoothness_mean",
+      "compactness_mean","concavity_mean","concave_points_mean","symmetry_mean","fractal_dimension_mean",
+      "radius_se","texture_se","perimeter_se","area_se","smoothness_se",
+      "compactness_se","concavity_se","concave_points_se","symmetry_se","fractal_dimension_se",
+      "radius_worst","texture_worst","perimeter_worst","area_worst","smoothness_worst",
+      "compactness_worst","concavity_worst","concave_points_worst","symmetry_worst","fractal_dimension_worst"
+    ];
 
-functions:
-  # ---- /health --------------------------------------------------------------
-  health:
-    handler: handler.health
-    memorySize: 256
-    timeout: 5
-    package:
-      patterns:
-        - handler.py
-    events:
-      - http:
-          path: health
-          method: get
-          cors: true                 # CORS simple pour un GET
+    // ———————————————————————————————————————————————————————————————————
+    // 2) Construction dynamique du formulaire
+    const container = document.getElementById("fields-container");
 
-  # ---- /predict -------------------------------------------------------------
-  predict:
-    handler: handler.predict
-    memorySize: 1024
-    timeout: 20
-    package:
-      patterns:
-        - handler.py
-        - "schemas/**"               # pour la validation du corps
-        - "*.pkl"                    # si tu embarques un modèle .pkl à la racine
-        - "model/**"                 # ou un dossier model/
-    events:
-      - http:
-          path: predict
-          method: post
-          cors:
-            origins: ${self:custom.allowedOrigins}
-            headers:
-              - Content-Type
-            allowCredentials: false
-          request:
-            schemas:                 # REST = 'schemas' (pluriel)
-              application/json:
-                name: PredictRequest
-                schema: ${file(schemas/predict.json)}
-                # Le schéma attendu : { "features": [ <30 nombres> ] }
+    FEATURE_ORDER.forEach((name) => {
+      const wrap = document.createElement("div");
+      wrap.className = "field";
 
-# ---- Sorties CloudFormation utiles -----------------------------------------
-resources:
-  Outputs:
-    ServiceEndpoint:
-      Description: REST API base URL
-      Value:
-        Fn::Join:
-          - ""
-          - - "https://"
-            - Ref: ApiGatewayRestApi
-            - ".execute-api."
-            - Ref: AWS::Region
-            - ".amazonaws.com/"
-            - ${sls:stage}
+      const label = document.createElement("label");
+      label.htmlFor = name;
+      label.textContent = name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
 
-    HealthUrl:
-      Description: Healthcheck URL
-      Value:
-        Fn::Join:
-          - ""
-          - - "https://"
-            - Ref: ApiGatewayRestApi
-            - ".execute-api."
-            - Ref: AWS::Region
-            - ".amazonaws.com/"
-            - ${sls:stage}
-            - "/health"
+      // Utilise <input type="text"> pour mieux accepter virgule ET point sur mobile
+      const input = document.createElement("input");
+      input.id = name;
+      input.name = name;
+      input.type = "text";
+      input.inputMode = "decimal";
+      input.placeholder = "12.34 ou 12,34";
+      input.autocomplete = "off";
+      input.required = true;
+      // Évite le scroll qui change la valeur sur certains navigateurs
+      input.addEventListener("wheel", e => e.target.blur());
 
-    PredictUrl:
-      Description: Predict URL
-      Value:
-        Fn::Join:
-          - ""
-          - - "https://"
-            - Ref: ApiGatewayRestApi
-            - ".execute-api."
-            - Ref: AWS::Region
-            - ".amazonaws.com/"
-            - ${sls:stage}
-            - "/predict"
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "Ex: 12.34 ou 12,34";
 
-# ci: trigger 2025-09-04T23:09:15Z
+      wrap.appendChild(label);
+      wrap.appendChild(input);
+      wrap.appendChild(hint);
+      container.appendChild(wrap);
+    });
+
+    // ———————————————————————————————————————————————————————————————————
+    // 3) Utilitaires
+    const errBox = document.getElementById("error-box");
+    function showError(msg){
+      errBox.textContent = msg;
+      errBox.style.display = "block";
+    }
+    function clearError(){
+      errBox.textContent = "";
+      errBox.style.display = "none";
+    }
+    function markInvalid(el){
+      el.classList.add("invalid");
+      el.focus({ preventScroll:false });
+      el.scrollIntoView({ behavior:"smooth", block:"center" });
+    }
+    function clearInvalid(){ document.querySelectorAll("input.invalid").forEach(i=>i.classList.remove("invalid")); }
+
+    // Conversion FR/EN → nombre JS
+    function toNumberLoose(v){
+      if (typeof v === "string") v = v.trim().replace(",", ".");
+      const n = Number.parseFloat(v);
+      return Number.isFinite(n) ? n : NaN;
+    }
+
+    // Extraction tolérante des valeurs utiles dans la réponse
+    function pickPrediction(d){
+      if (d == null) return null;
+      if (typeof d === "number" || typeof d === "string") return d;
+      if (Array.isArray(d)) return d[0];
+      if (typeof d === "object") {
+        if (Array.isArray(d.predictions)) return d.predictions[0];
+        return d.prediction ?? d.result ?? d.output ?? d.label ?? null;
+      }
+      return null;
+    }
+    function pickProbaOne(d){
+      if (!d || typeof d !== "object") return null;
+
+      if (typeof d.proba === "number") return d.proba;
+      if (typeof d.probability === "number") return d.probability;
+      if (typeof d.score === "number") return d.score;
+      if (typeof d.p1 === "number") return d.p1;
+      if (typeof d.proba_1 === "number") return d.proba_1;
+
+      if (Array.isArray(d.probabilities)) {
+        const a = d.probabilities;
+        if (Array.isArray(a[0]) && a[0].length >= 2) return a[0][1]; // [[p0,p1]]
+        if (typeof a[1] === "number") return a[1];                    // [p0,p1]
+      }
+      if (Array.isArray(d.probas)) {
+        const a = d.probas;
+        if (Array.isArray(a[0]) && a[0].length >= 2) return a[0][1];
+        if (typeof a[1] === "number") return a[1];
+      }
+      const obj = d.probabilities || d.probas || d.scores || null;
+      if (obj && typeof obj === "object") {
+        if (typeof obj["1"] === "number") return obj["1"];
+        if (typeof obj["tumeur maligne"] === "number") return obj["tumeur maligne"];
+        if (typeof obj["0"] === "number") return obj["0"];
+        if (typeof obj["tumeur bégnine"] === "number") return obj["tumeur bégnine"];
+      }
+      return null;
+    }
+
+    // ———————————————————————————————————————————————————————————————————
+    // 4) Soumission
+    const form = document.getElementById("prediction-form");
+    const submitBtn = document.getElementById("submit-btn");
+    const resetBtn  = document.getElementById("reset-btn");
+
+    resetBtn.addEventListener("click", () => { clearError(); clearInvalid(); });
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      clearError(); clearInvalid();
+
+      // 4.1) Collecte + validation stricte
+      const values = [];
+      for (const id of FEATURE_ORDER) {
+        const el = document.getElementById(id);
+        const n = toNumberLoose(el.value);
+        if (!Number.isFinite(n)) { markInvalid(el); showError("Valeur manquante ou invalide pour « "+id+" »."); return; }
+        values.push(n);
+      }
+      if (values.length !== 30) { showError("Il faut exactement 30 valeurs numériques."); return; }
+
+      // 4.2) Bouton en état 'chargement'
+      submitBtn.classList.add("loading");
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Analyse en cours…";
+
+      // 4.3) Appel API avec timeout (utile si CORS/SSL/ réseau)
+      const ctrl = new AbortController();
+      const TIMEOUT_MS = 15000; // 15 s
+      const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+
+      try {
+        const res = await fetch(API_URL, {
+          method: "POST",
+          mode: "cors",                       // explicite (par défaut)
+          headers: { "Content-Type": "application/json" }, // ne pas ajouter d'autres headers !
+          body: JSON.stringify({ features: values }),
+          signal: ctrl.signal
+        });
+        clearTimeout(timer);
+
+        if (!res.ok) {
+          const txt = await res.text().catch(()=> "");
+          throw new Error(`HTTP ${res.status}${txt ? " — "+txt : ""}`);
+        }
+
+        // 4.4) JSON (tolérant au texte)
+        let data = null;
+        try { data = await res.json(); } catch { /* texte brut, on gère plus bas */ }
+
+        let pred  = pickPrediction(data);
+        let proba = pickProbaOne(data);
+
+        // Normalisations
+        if (typeof pred === "string" && /^\d+(\.\d+)?$/.test(pred)) pred = Number(pred);
+        if (typeof proba === "number") {
+          if (proba > 1) proba = proba / 100;                // % → 0..1
+          proba = Math.max(0, Math.min(1, proba));           // clamp
+        } else {
+          proba = null;
+        }
+        if (pred == null) throw new Error("Réponse JSON sans champ de prédiction.");
+
+        // 4.5) Redirection
+        const url = new URL("/result.html", window.location.origin);
+        url.searchParams.set("prediction", String(pred));
+        if (proba !== null) url.searchParams.set("proba", String(proba));
+        window.location.href = url.toString();
+
+      } catch (err) {
+        clearTimeout(timer);
+        console.error(err);
+
+        // Messages plus clairs pour les cas classiques
+        if (err.name === "AbortError") {
+          showError("Temps dépassé (timeout). Vérifiez la connectivité ou réessayez.");
+        } else if (/Failed to fetch|NetworkError|TypeError/i.test(err.message)) {
+          showError("Connexion impossible (réseau, CORS ou certificat SSL).");
+        } else if (/CORS|Missing Allow/i.test(err.message)) {
+          showError("Requête bloquée par CORS. Vérifiez la configuration de l’API.");
+        } else {
+          showError("Erreur pendant la prédiction : " + err.message);
+        }
+      } finally {
+        submitBtn.classList.remove("loading");
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Lancer la prédiction";
+      }
+    });
+  </script>
+</body>
+</html>
