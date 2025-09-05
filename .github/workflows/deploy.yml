@@ -90,6 +90,9 @@ jobs:
         run: |
           npx -y serverless@4 deploy --stage "$STAGE" --region "$AWS_REGION"
 
+      - name: Smoke test
+        run: bash scripts/smoke.sh
+    
       - name: Show endpoints
         if: always()
         env:
