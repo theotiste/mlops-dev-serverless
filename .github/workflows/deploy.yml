@@ -91,6 +91,9 @@ jobs:
           npx -y serverless@4 deploy --stage "$STAGE" --region "$AWS_REGION"
 
       - name: Smoke test
+        env:
+        REGION: ${{ env.AWS_REGION }}
+        STACK:  cancer-prediction-api-dev
         run: bash scripts/smoke.sh
     
       - name: Show endpoints
