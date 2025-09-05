@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow",
+      "Action": [ "cloudformation:*", "lambda:*", "apigateway:*", "logs:*", "s3:*" ],
+      "Resource": "*"
+    },
+    { "Effect": "Allow",
+      "Action": [ "ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:DescribeParameters" ],
+      "Resource": "*"
+    },
+    { "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole","iam:DeleteRole","iam:GetRole","iam:UpdateAssumeRolePolicy",
+        "iam:TagRole","iam:UntagRole",
+        "iam:AttachRolePolicy","iam:DetachRolePolicy",
+        "iam:PutRolePolicy","iam:DeleteRolePolicy","iam:GetRolePolicy",
+        "iam:ListRolePolicies","iam:ListAttachedRolePolicies",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::571600829584:role/cancer-prediction-api-*"
+    }
+  ]
+}
