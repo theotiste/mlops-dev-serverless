@@ -17,9 +17,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-${{ github.ref }}-dev
+  cancel-in-progress: true
+
 env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
   STAGE: dev
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
   deploy:
@@ -36,11 +40,11 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      - name: Setup Node.js
+      - name: Setup Node.js (with cache)
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: 'npm'
+          cache: npm
 
       - name: Install Node deps (plugins Serverless, etc.)
         run: |
@@ -51,18 +55,79 @@ jobs:
       - name: Print resolved Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          npx -y serverless@4 print --stage "$STAGE" --region "$AWS_REGION"
+        run: npx -y serverless@4 print --stage "$STAGE" --region "$AWS_REGION"
 
       - name: Deploy
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          npx -y serverless@4 deploy --stage "$STAGE" --region "$AWS_REGION"
+        run: npx -y serverless@4 deploy --stage "$STAGE" --region "$AWS_REGION"
 
       - name: Smoke test
+        shell: bash
         env:
-          REGION: ${{ env.AWS_REGION }}
-          STACK:  cancer-prediction-api-dev
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          bash scripts/smoke.sh
+          set -euo pipefail
+
+          STACK="cancer-prediction-api-${STAGE}"
+
+          # Récupère les URLs directement depuis les Outputs CFN (HealthUrl & PredictUrl)
+          HEALTH_URL="$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name "$STACK" \
+            --query 'Stacks[0].Outputs[?OutputKey==`HealthUrl`].OutputValue' \
+            --output text)"
+
+          PREDICT_URL="$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name "$STACK" \
+            --query 'Stacks[0].Outputs[?OutputKey==`PredictUrl`].OutputValue' \
+            --output text)"
+
+          echo "Health : $HEALTH_URL"
+          echo "Predict: $PREDICT_URL"
+
+          # 1) /health (GET)
+          echo "🔎 GET /health"
+          curl -fsS -i "$HEALTH_URL" | sed -n '1,10p'  # court aperçu
+          curl -fsS "$HEALTH_URL" | jq -e '.ok == true' >/dev/null
+
+          # 2) payload pour /predict
+          #   - si features_input.json contient déjà { "features": [...] }, on normalise
+          #   - sinon on considère que c'est un tableau brut de 30 nombres
+          if [ -f features_input.json ]; then
+            jq '{features: (.features // . | map(tonumber))}' features_input.json > payload.json
+          elif [ -f features_input_named.json ]; then
+            # Optionnel: si tu fournis un objet nommé -> on ordonne pas ici (garde simple)
+            jq '{features: (.features // (to_entries|map(.value)|map(tonumber)))}' features_input_named.json > payload.json
+          else
+            echo "❌ Aucun fichier d'entrée (features_input.json) trouvé" >&2
+            exit 1
+          fi
+
+          # 3) POST /predict
+          echo "🚀 POST /predict"
+          RESP="$(curl -fsS -H "Content-Type: application/json" --data-binary @payload.json "$PREDICT_URL")"
+          echo "$RESP" | jq .
+
+          # Check minimal: présence de predictions[] OU probabilities[]
+          echo "$RESP" | jq -e 'has("predictions") or has("probabilities")' >/dev/null
+
+          # Résumé (Job Summary)
+          {
+            echo "## Smoke test (stage: ${STAGE})"
+            echo ""
+            echo "**Health**  : $HEALTH_URL"
+            echo "**Predict** : $PREDICT_URL"
+            echo ""
+            echo "### Exemple de réponse"
+            echo ""
+            echo '```json'
+            echo "$RESP" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prune old deployments (keep last 3)
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: npx -y serverless@4 prune -n 3 --stage "$STAGE" --region "$AWS_REGION"
