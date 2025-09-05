@@ -1,0 +1,139 @@
+
+service: cancer-prediction-api
+frameworkVersion: '4'
+configValidationMode: error
+provider:
+  name: aws
+  runtime: python3.12
+  region: eu-west-3
+  stage: dev
+  memorySize: 512
+  timeout: 15
+  logRetentionInDays: 14
+  tracing:
+    lambda: true
+  environment:
+    STAGE: dev
+  apiGateway:
+    minimumCompressionSize: 1024
+  logs:
+    restApi:
+      accessLogging: true
+      executionLogging: true
+      level: INFO
+      fullExecutionData: false
+  deploymentBucket: null
+  tags:
+    Project: mlops-breast-cancer
+    Service: cancer-prediction-api
+    Stage: dev
+  versionFunctions: true
+  deploymentBucketObject:
+    blockPublicAccess: true
+    serverSideEncryption: AES256
+package:
+  individually: true
+  patterns:
+    - '!**/__pycache__/**'
+    - '!**/*.ipynb'
+    - '!**/*.csv'
+    - '!**/*.parquet'
+    - '!node_modules/**'
+    - '!venv/**'
+    - '!train-venv/**'
+    - '!*.zip'
+    - '!.git/**'
+  artifactsS3KeyDirname: serverless/cancer-prediction-api/dev/code-artifacts
+custom:
+  allowedOrigins:
+    - https://form.mlopstheotiste.fr
+    - https://main.d1s8fkj9in84k5.amplifyapp.com
+functions:
+  health:
+    handler: handler.health
+    package:
+      patterns:
+        - handler.py
+    events:
+      - http:
+          path: health
+          method: get
+          cors: true
+    name: cancer-prediction-api-dev-health
+  predict:
+    handler: handler.predict
+    timeout: 20
+    package:
+      patterns:
+        - handler.py
+        - schemas/**
+        - model/**
+        - RandomForest.pkl
+        - model-layer/python/**
+        - '!**/__pycache__/**'
+    events:
+      - http:
+          path: predict
+          method: post
+          cors:
+            origins:
+              - https://form.mlopstheotiste.fr
+              - https://main.d1s8fkj9in84k5.amplifyapp.com
+            headers:
+              - Content-Type
+            allowCredentials: false
+          request:
+            schemas:
+              application/json:
+                $schema: http://json-schema.org/draft-04/schema#
+                title: PredictRequest
+                type: object
+                additionalProperties: false
+                required:
+                  - features
+                properties:
+                  features:
+                    type: array
+                    minItems: 30
+                    maxItems: 30
+                    items:
+                      type: number
+    name: cancer-prediction-api-dev-predict
+resources:
+  Outputs:
+    ServiceEndpoint:
+      Description: REST API base URL
+      Value:
+        Fn::Join:
+          - ''
+          - - https://
+            - Ref: ApiGatewayRestApi
+            - .execute-api.
+            - Ref: AWS::Region
+            - .amazonaws.com/
+            - dev
+    HealthUrl:
+      Description: Healthcheck URL
+      Value:
+        Fn::Join:
+          - ''
+          - - https://
+            - Ref: ApiGatewayRestApi
+            - .execute-api.
+            - Ref: AWS::Region
+            - .amazonaws.com/
+            - dev
+            - /health
+    PredictUrl:
+      Description: Predict URL
+      Value:
+        Fn::Join:
+          - ''
+          - - https://
+            - Ref: ApiGatewayRestApi
+            - .execute-api.
+            - Ref: AWS::Region
+            - .amazonaws.com/
+            - dev
+            - /predict
+ 
