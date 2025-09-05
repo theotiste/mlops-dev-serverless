@@ -18,17 +18,12 @@ permissions:
   contents: read
 
 env:
-  # Stage & région utilisées par Serverless
+  AWS_REGION: ${{ secrets.AWS_REGION }}
   STAGE: dev
-  # Utilise le secret AWS_REGION s'il existe, sinon 'eu-west-3'
-  AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'eu-west-3' }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    concurrency:
-      group: backend-deploy-${{ github.ref }}
-      cancel-in-progress: true
 
     steps:
       - name: Checkout
@@ -40,44 +35,19 @@ jobs:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
-          output-env-credentials: true
 
-      # Détecte si un lock file npm est présent
-      - name: Detect npm lock file
-        id: lock
-        run: |
-          if [[ -f package-lock.json || -f npm-shrinkwrap.json || -f yarn.lock ]]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Node + cache uniquement si lock file présent
-      - name: Setup Node.js (with cache)
-        if: steps.lock.outputs.found == 'true'
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: npm
-
-      # Sinon Node sans cache
-      - name: Setup Node.js (no cache)
-        if: steps.lock.outputs.found != 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
+          cache: 'npm'
 
       - name: Install Node deps (plugins Serverless, etc.)
         run: |
-          if [ -f package-lock.json ]; then
+          if [ -f package.json ]; then
             npm ci
-          elif [ -f package.json ]; then
-            npm i
-          else
-            echo "No package.json found – skipping npm install."
           fi
 
-      # Serverless v4 nécessite la clé d’accès (compte Serverless)
       - name: Print resolved Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
@@ -92,13 +62,7 @@ jobs:
 
       - name: Smoke test
         env:
-        REGION: ${{ env.AWS_REGION }}
-        STACK:  cancer-prediction-api-dev
-        run: bash scripts/smoke.sh
-    
-      - name: Show endpoints
-        if: always()
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          REGION: ${{ env.AWS_REGION }}
+          STACK:  cancer-prediction-api-dev
         run: |
-          npx -y serverless@4 info --stage "$STAGE" --region "$AWS_REGION"
+          bash scripts/smoke.sh
