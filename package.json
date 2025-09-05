@@ -1,9 +1,25 @@
 {
   "name": "mlops-dev-serverless",
-  "version": "0.0.0",
   "private": true,
   "devDependencies": {
-    "serverless": "^4",
-    "serverless-prune-plugin": "^2"
-  }
+    "serverless": "^4.18.2",
+    "serverless-prune-plugin": "^2.1.0"
+  },
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theotiste/mlops-dev-serverless.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/theotiste/mlops-dev-serverless/issues"
+  },
+  "homepage": "https://github.com/theotiste/mlops-dev-serverless#readme",
+  "description": ""
 }
