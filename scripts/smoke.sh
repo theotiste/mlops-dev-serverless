@@ -4,17 +4,34 @@ set -euo pipefail
 REGION="${REGION:-eu-west-3}"
 STACK="${STACK:-cancer-prediction-api-dev}"
 
-BASE_URL=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
-  --query "Stacks[0].Outputs[?OutputKey=='ServiceEndpoint'].OutputValue" --output text)
+json=$(aws cloudformation describe-stacks \
+  --region "$REGION" --stack-name "$STACK" --output json)
 
-HEALTH_URL="${BASE_URL}/health"
-PREDICT_URL="${BASE_URL}/predict"
+# Récupère directement les URLs finales
+HEALTH_URL=$(jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="HealthUrl")  | .OutputValue' <<<"$json")
+PREDICT_URL=$(jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="PredictUrl") | .OutputValue' <<<"$json")
 
-echo "Health: $HEALTH_URL"
-curl -fsS "$HEALTH_URL" | jq -e '.ok == true' >/dev/null
+# Fallback au cas où (très rarement utile)
+if [[ -z "$HEALTH_URL" || "$HEALTH_URL" == "null" ]]; then
+  BASE_URL=$(jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="ServiceEndpoint") | .OutputValue' <<<"$json")
+  BASE_URL="${BASE_URL%/}"           # retire un éventuel slash final
+  HEALTH_URL="${BASE_URL}/health"
+  PREDICT_URL="${BASE_URL}/predict"
+fi
 
-# construit un payload valide à partir d'un fichier local
+echo "Health:  $HEALTH_URL"
+echo "Predict: $PREDICT_URL"
+
+# --- /health : GET simple
+curl --fail --show-error --silent --location --header "Accept: application/json" \
+     "$HEALTH_URL" | jq -e '.ok == true' >/dev/null
+echo "Health OK"
+
+# --- /predict : exemple avec features_input.json
 jq '{features: (.features | map(tonumber))}' features_input.json > payload.json
-curl -fsS -H "Content-Type: application/json" --data-binary @payload.json "$PREDICT_URL" | jq .
 
-echo "Smoke test OK"
+curl --fail --show-error --silent --location \
+     -H "Content-Type: application/json" \
+     --data-binary @payload.json \
+     "$PREDICT_URL" | jq .
+echo "Predict OK"
