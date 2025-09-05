@@ -17,9 +17,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
+  # Si tu préfères une variable de repo: remplace par ${{ vars.AWS_REGION }}
   AWS_REGION: ${{ secrets.AWS_REGION }}
   STAGE: dev
+  SERVERLESS_TELEMETRY_DISABLED: "1"
 
 jobs:
   deploy:
@@ -34,7 +40,11 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          # Fallback au cas où le secret/var n’existe pas
+          aws-region:            ${{ env.AWS_REGION != '' && env.AWS_REGION || 'eu-west-3' }}
+
+      - name: Who am I?
+        run: aws sts get-caller-identity
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -44,11 +54,12 @@ jobs:
 
       - name: Install Node deps (plugins Serverless, etc.)
         run: |
-          if [ -f package.json ]; then
+          if [ -f package-lock.json ]; then
             npm ci
+          elif [ -f package.json ]; then
+            npm i
           fi
 
-      # Serverless v4 a besoin de la licence/clé d’accès
       - name: Print resolved Serverless config
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
