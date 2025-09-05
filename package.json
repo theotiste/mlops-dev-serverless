@@ -1,7 +1,9 @@
 {
   "name": "mlops-dev-serverless",
+  "version": "0.0.0",
   "private": true,
   "devDependencies": {
-    "serverless-prune-plugin": "^2.0.0"
+    "serverless": "^4",
+    "serverless-prune-plugin": "^2"
   }
 }
