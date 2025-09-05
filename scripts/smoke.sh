@@ -2,36 +2,53 @@
 set -euo pipefail
 
 REGION="${REGION:-eu-west-3}"
-STACK="${STACK:-cancer-prediction-api-dev}"
+STAGE="${STAGE:-dev}"
+STACK="${STACK:-cancer-prediction-api-${STAGE}}"
 
-json=$(aws cloudformation describe-stacks \
-  --region "$REGION" --stack-name "$STACK" --output json)
+jq --version >/dev/null 2>&1 || { echo "jq manquant"; exit 1; }
+aws --version >/dev/null 2>&1 || { echo "awscli manquant"; exit 1; }
 
-# Récupère directement les URLs finales
-HEALTH_URL=$(jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="HealthUrl")  | .OutputValue' <<<"$json")
-PREDICT_URL=$(jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="PredictUrl") | .OutputValue' <<<"$json")
+echo "Stack  : $STACK"
+echo "Region : $REGION"
+echo "Stage  : $STAGE"
 
-# Fallback au cas où (très rarement utile)
-if [[ -z "$HEALTH_URL" || "$HEALTH_URL" == "null" ]]; then
-  BASE_URL=$(jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="ServiceEndpoint") | .OutputValue' <<<"$json")
-  BASE_URL="${BASE_URL%/}"           # retire un éventuel slash final
-  HEALTH_URL="${BASE_URL}/health"
-  PREDICT_URL="${BASE_URL}/predict"
-fi
+HEALTH_URL="$(aws cloudformation describe-stacks \
+  --region "$REGION" --stack-name "$STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='HealthUrl'].OutputValue" \
+  --output text)"
 
-echo "Health:  $HEALTH_URL"
+PREDICT_URL="$(aws cloudformation describe-stacks \
+  --region "$REGION" --stack-name "$STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='PredictUrl'].OutputValue" \
+  --output text)"
+
+echo "Health : $HEALTH_URL"
 echo "Predict: $PREDICT_URL"
 
-# --- /health : GET simple
-curl --fail --show-error --silent --location --header "Accept: application/json" \
-     "$HEALTH_URL" | jq -e '.ok == true' >/dev/null
-echo "Health OK"
+# petit retry pour la propagation API Gateway/CloudFront
+for i in {1..8}; do
+  if out="$(curl -fsS "$HEALTH_URL")"; then
+    echo "$out" | jq .
+    echo "$out" | jq -e '.ok==true and .stage=="dev"' >/dev/null
+    break
+  fi
+  echo "Health non disponible (tentative $i/8), on attend…"
+  sleep 3
+done
 
-# --- /predict : exemple avec features_input.json
-jq '{features: (.features | map(tonumber))}' features_input.json > payload.json
+# payload
+if [[ -f features_input.json ]]; then
+  jq '{features: (.features | map(tonumber))}' features_input.json > payload.json
+else
+  # fallback : 30 zéros si le fichier n’est pas là
+  jq -n '{features: (range(30)|[inputs])}' <<< "$(yes 0 | head -n 30)"
+fi
 
-curl --fail --show-error --silent --location \
-     -H "Content-Type: application/json" \
-     --data-binary @payload.json \
-     "$PREDICT_URL" | jq .
-echo "Predict OK"
+resp="$(curl -fsS -H "Content-Type: application/json" --data-binary @payload.json "$PREDICT_URL")"
+echo "$resp" | jq .
+
+# validations minimales
+echo "$resp" | jq -e '.predictions|length==1' >/dev/null
+echo "$resp" | jq -e '.probabilities|length==1' >/devnull
+
+echo "✅ Smoke test OK"
