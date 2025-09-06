@@ -7,26 +7,35 @@ provider:
   region: ${env:AWS_REGION, "eu-west-3"}
   stage: ${env:STAGE, "dev"}
   memorySize: 256
-  timeout: 29
+  timeout: 29          # API Gateway = 29s max
   logRetentionInDays: 14
   stackName: cancer-prediction-api-${sls:stage}
   apiGateway:
-    # REST API (URL avec /dev)
-    minimumCompressionSize: 1024
     shouldStartNameWithService: true
+    minimumCompressionSize: 1024
     metrics: true
   environment:
     STAGE: ${sls:stage}
 
+# PACKAGING: minimal et individuel
 package:
+  individually: true
   patterns:
-    - "handler.py"
-    - "model-layer/**"
-    - "schemas/**"
-    - "!node_modules/**"
-    - "!venv/**"
-    - "!ui/**"
-    - "!**/*.md"
+    # Exclut tout par défaut (on remettra ce qu'il faut dans chaque fonction)
+    - '!**/*'
+    # Garde le repo propre :
+    - '!node_modules/**'
+    - '!venv/**'
+    - '!__pycache__/**'
+    - '!ui/**'
+    - '!.git/**'
+    - '!.serverless/**'
+    - '!tests/**'
+    - '!*.md'
+    - '!*.log'
+    - '!package*.json'
+    - '!Dockerfile'
+    - '!Makefile'
 
 layers:
   model:
@@ -34,40 +43,48 @@ layers:
     name: model-layer-${sls:stage}
     compatibleRuntimes:
       - python3.11
+    # si ton dossier model-layer contient pile/poids lourds inutiles, nettoie-le
+    # ou ajoute un sous-dossier (ex: model-layer/runtime/...) et mets uniquement l’essentiel
 
 functions:
   health:
     handler: handler.health
+    # Inclut uniquement ce qui est nécessaire à /health
+    package:
+      patterns:
+        - handler.py
+        - schemas/**        # si tu valides des schémas dans health; sinon supprime
     events:
       - http:
           path: health
           method: get
           cors:
             origin: "${env:FORM_ORIGIN, 'https://form.mlopstheotiste.fr'}"
-            headers:
-              - Content-Type
+            headers: [ Content-Type ]
             allowCredentials: false
 
   predict:
     handler: handler.predict
+    timeout: 28            # < 29s (limite API GW)
     memorySize: 512
-    timeout: 30
     layers:
       - { Ref: ModelLambdaLayer }
+    # Pas de model-layer ici: il est déjà dans la layer
+    package:
+      patterns:
+        - handler.py
+        - schemas/**        # si nécessaire (validation d’input)
     events:
       - http:
           path: predict
           method: post
           cors:
             origin: "${env:FORM_ORIGIN, 'https://form.mlopstheotiste.fr'}"
-            headers:
-              - Content-Type
+            headers: [ Content-Type ]
             allowCredentials: false
 
 plugins:
   - serverless-prune-plugin
-  # (optionnel) décommente si tu utilises ce plugin :
-  # - serverless-python-requirements
 
 custom:
   prune:
