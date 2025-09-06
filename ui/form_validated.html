@@ -148,8 +148,10 @@
       const obj = d.probabilities || d.probas || d.scores || null;
       if (obj && typeof obj === "object") {
       if (typeof obj["1"] === "number") return obj["1"];
-      if (typeof obj["malign"] === "number") return obj["malign"];
-      if (typeof obj["malignant"] === "number") return obj["malignant"];
+      if (typeof obj["tumeur maligne"] === "number") return obj["tumeur maligne"];
+      if (typeof obj["1"] === "number") return obj["0"];
+      if (typeof obj["tumeur bégnine"] === "number") return obj["tumeur bégnine"];
+      
      }
      return null;
     }
