@@ -1,15 +1,36 @@
 service: cancer-prediction-api
-frameworkVersion: '4'
+
+frameworkVersion: '4'   # compatible v4
 
 provider:
   name: aws
-  runtime: python3.11
-  region: ${env:AWS_REGION, 'eu-west-3'}
-  stage:  ${env:STAGE, 'dev'}
-  memorySize: 256
+  region: ${opt:region, 'eu-west-3'}
+  stage: ${opt:stage, 'dev'}
+  runtime: python3.12
+  architecture: arm64
+  memorySize: 512
   timeout: 30
+  deploymentBucket:
+    blockPublicAccess: true
+  # IMPORTANT : ne pas activer logs.restApi ici pour éviter le conflit de rôle CloudWatch d’API Gateway
   logs:
-    restApi: true
+    restApi: false
+
+  iam:
+    role:
+      statements:
+        # CloudWatch Logs (au cas où, sinon la managed policy par défaut suffit la plupart du temps)
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: arn:aws:logs:${self:provider.region}:*:*
+
+package:
+  individually: true
+  # Pas de patterns ici pour éviter l’erreur “No file matches include / exclude patterns”.
+  # Le plugin requirements met les libs dans une layer dédiée, ce qui garde les zips de fonctions petits.
 
 plugins:
   - serverless-python-requirements
@@ -17,38 +38,17 @@ plugins:
 
 custom:
   pythonRequirements:
-    slim: true
+    dockerizePip: true       # évite d’avoir Python installé en CI
+    layer: true              # les dépendances vont dans une Lambda Layer auto-générée
+    slim: true               # supprime fichiers inutiles dans les wheels
+    zip: true                # compresse la layer
     useStaticCache: true
     useDownloadCache: true
-    invalidateCaches: false
+    # Si tu utilises des wheels précompilés: pipCmdExtraArgs: ['--only-binary=:all:']
+
   prune:
     automatic: true
     number: 3
-
-# ⚠️ IMPORTANT : on inclut explicitement les sources nécessaires
-# (ajuste les chemins si tes dossiers/fichiers se nomment autrement)
-package:
-  individually: true
-  patterns:
-    # INCLUDES (positifs) – au moins un doit correspondre !
-    - handler.py
-    - model-layer/**           # ton code modèle
-    - schemas/**               # tes schémas / data
-    - requirements.txt
-    - .requirements/**         # ajouté par serverless-python-requirements
-
-    # EXCLUDES (négatifs)
-    - '!ui/**'
-    - '!.git/**'
-    - '!.venv/**'
-    - '!node_modules/**'
-    - '!**/__pycache__/**'
-    - '!**/*.pyc'
-    - '!**/*.pyo'
-    - '!tests/**'
-    - '!README.md'
-    - '!package-lock.json'
-    - '!package.json'          # pas utile dans la Lambda Python
 
 functions:
   health:
@@ -61,6 +61,9 @@ functions:
 
   predict:
     handler: handler.predict
+    # On attache la layer auto du plugin (pas de layer custom tant que non nécessaire)
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
     events:
       - http:
           path: predict
@@ -73,7 +76,7 @@ functions:
               - Content-Type
             allowCredentials: false
 
-# Sorties pratiques
+# Sorties CloudFormation pratiques
 outputs:
   ServiceEndpoint:
     Description: Base URL
