@@ -71,13 +71,14 @@ jobs:
       - name: Deploy
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4 deploy --stage "$STAGE" --region "$AWS_REGION"
+        run: npx -y serverless@4.18.2 print --stage "$STAGE" --region "$AWS_REGION"
+       
 
       - name: Deploy
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4 deploy --stage "$STAGE" --region "$AWS_REGION"
-
+        run: npx -y serverless@4.18.2 deploy --stage "$STAGE" --region "$AWS_REGION"  
+      
       - name: Smoke test
         shell: bash
         env:
