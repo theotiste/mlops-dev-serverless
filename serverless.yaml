@@ -5,112 +5,110 @@ provider:
   name: aws
   runtime: python3.11
   region: ${env:AWS_REGION, 'eu-west-3'}
-  stage: ${env:STAGE, 'dev'}
+  stage:  ${env:STAGE, 'dev'}
   memorySize: 256
   timeout: 30
-  logRetentionInDays: 14
+  logs:
+    restApi: true
 
 plugins:
   - serverless-python-requirements
   - serverless-prune-plugin
 
 custom:
+  pythonRequirements:
+    slim: true
+    useStaticCache: true
+    useDownloadCache: true
+    invalidateCaches: false
   prune:
     automatic: true
     number: 3
-  pythonRequirements:
-    slim: true
-    noDeploy:
-      - boto3
-      - botocore
 
-# 1) sécurité : on inclut « tout » puis on filtre les évidents inutiles
+# ⚠️ IMPORTANT : on inclut explicitement les sources nécessaires
+# (ajuste les chemins si tes dossiers/fichiers se nomment autrement)
 package:
   individually: true
   patterns:
-    - '**/*'
-    - '!node_modules/**'
-    - '!venv/**'
-    - '!**/__pycache__/**'
-    - '!tests/**'
+    # INCLUDES (positifs) – au moins un doit correspondre !
+    - handler.py
+    - model-layer/**           # ton code modèle
+    - schemas/**               # tes schémas / data
+    - requirements.txt
+    - .requirements/**         # ajouté par serverless-python-requirements
+
+    # EXCLUDES (négatifs)
+    - '!ui/**'
     - '!.git/**'
+    - '!.venv/**'
+    - '!node_modules/**'
+    - '!**/__pycache__/**'
     - '!**/*.pyc'
+    - '!**/*.pyo'
+    - '!tests/**'
+    - '!README.md'
+    - '!package-lock.json'
+    - '!package.json'          # pas utile dans la Lambda Python
 
 functions:
   health:
     handler: handler.health
     events:
-      - httpApi:
-          method: GET
-          path: /health
-    package:
-      patterns:
-        - '!**/*'
-        - 'handler.py'
-        - 'schemas/**'
+      - http:
+          path: health
+          method: get
+          cors: true
 
   predict:
     handler: handler.predict
     events:
-      - httpApi:
-          method: POST
-          path: /predict
-    layers:
-      - { Ref: ModelLayerLambdaLayer }
-    package:
-      patterns:
-        - '!**/*'
-        - 'handler.py'
-        - 'schemas/**'
-        - 'model-layer/**'
+      - http:
+          path: predict
+          method: post
+          cors:
+            origins:
+              - https://form.mlopstheotiste.fr
+              - https://dbc4cwxk7wl7p.cloudfront.net
+            headers:
+              - Content-Type
+            allowCredentials: false
 
-layers:
-  modelLayer:
-    path: model-layer
-    name: ${self:service}-${sls:stage}-model
-    compatibleRuntimes:
-      - python3.11
-    package:
-      patterns:
-        - '!**/*'
-        - 'model-layer/**'
-        - '!**/__pycache__/**'
-        - '!tests/**'
+# Sorties pratiques
+outputs:
+  ServiceEndpoint:
+    Description: Base URL
+    Value:
+      Fn::Join:
+        - ''
+        - - https://
+          - Ref: ApiGatewayRestApi
+          - .execute-api.
+          - Ref: AWS::Region
+          - .amazonaws.com/
+          - ${self:provider.stage}
 
-resources:
-  Outputs:
-    ServiceEndpoint:
-      Description: API base URL
-      Value:
-        Fn::Join:
-          - ''
-          - - 'https://'
-            - Ref: ApiGatewayRestApi
-            - '.execute-api.'
-            - Ref: AWS::Region
-            - '.amazonaws.com/'
-            - ${sls:stage}
-    HealthUrl:
-      Description: Healthcheck URL
-      Value:
-        Fn::Join:
-          - ''
-          - - 'https://'
-            - Ref: ApiGatewayRestApi
-            - '.execute-api.'
-            - Ref: AWS::Region
-            - '.amazonaws.com/'
-            - ${sls:stage}
-            - '/health'
-    PredictUrl:
-      Description: Predict URL
-      Value:
-        Fn::Join:
-          - ''
-          - - 'https://'
-            - Ref: ApiGatewayRestApi
-            - '.execute-api.'
-            - Ref: AWS::Region
-            - '.amazonaws.com/'
-            - ${sls:stage}
-            - '/predict'
+  HealthUrl:
+    Description: Healthcheck URL
+    Value:
+      Fn::Join:
+        - ''
+        - - https://
+          - Ref: ApiGatewayRestApi
+          - .execute-api.
+          - Ref: AWS::Region
+          - .amazonaws.com/
+          - ${self:provider.stage}
+          - /health
+
+  PredictUrl:
+    Description: Predict URL
+    Value:
+      Fn::Join:
+        - ''
+        - - https://
+          - Ref: ApiGatewayRestApi
+          - .execute-api.
+          - Ref: AWS::Region
+          - .amazonaws.com/
+          - ${self:provider.stage}
+          - /predict
