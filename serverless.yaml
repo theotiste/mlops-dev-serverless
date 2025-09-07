@@ -7,7 +7,7 @@ provider:
   region: ${opt:region, 'eu-west-3'}
   stage: ${opt:stage, 'dev'}
   runtime: python3.12
-  architecture: arm64
+  architecture: x86_64
   memorySize: 512
   timeout: 30
   deploymentBucket:
