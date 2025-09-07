@@ -1,6 +1,6 @@
 service: cancer-prediction-api
 
-frameworkVersion: ">=4.0.0 <5.0.0"
+frameworkVersion: "4"
 
 plugins:
   - serverless-python-requirements
