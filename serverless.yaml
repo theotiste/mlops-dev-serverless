@@ -1,61 +1,73 @@
 service: cancer-prediction-api
-
 frameworkVersion: "4"
-
-plugins:
-  - serverless-python-requirements
-  - serverless-prune-plugin
 
 provider:
   name: aws
   runtime: python3.12
-  architecture: x86_64        # évite les surprises côté image de build
-  stage: ${opt:stage, env:STAGE, 'dev'}
-  region: ${opt:region, env:AWS_REGION, 'eu-west-3'}
-  memorySize: 256
-  # timeout par défaut (chaque fonction peut override)
-  timeout: 10
-  environment:
-    STAGE: ${self:provider.stage}
-    AWS_REGION: ${self:provider.region}
-  # Ne pas activer les logs REST API ici pour éviter les conflits "custom apigw cw role"
-  # logs:
-  #   restApi: true
+  # ✅ on lit la région depuis l'env CI/CD mais on NE l'injecte PAS dans l'env Lambda
+  region: ${env:AWS_REGION, 'eu-west-3'}
+  stage: ${env:STAGE, 'dev'}
 
-package:
-  individually: true
+  # API Gateway timeouts ~29s -> évite 30s côté Lambda
+  timeout: 28
+  memorySize: 512
+  architecture: x86_64   # évite les images arm64 côté CI; mets "arm64" si tu le souhaites
+
+  logs:
+    http: true
+
+  # ✅ PAS de variables réservées (AWS_REGION, AWS_DEFAULT_REGION, LAMBDA_*)
+  environment:
+    STAGE: ${sls:stage}
+    REGION_ALIAS: ${aws:region}  # si ton code veut une variable lisible côté Lambda
+
+# ---- Plugins ---------------------------------------------------------------
+plugins:
+  - serverless-python-requirements
+  - serverless-prune-plugin
 
 custom:
-  # Génère une Lambda Layer avec les libs Python
+  # Réduit la taille et met les deps Python dans une couche dédiée
   pythonRequirements:
-    dockerizePip: true         # build dans une image compatible Lambda
-    layer: true                # crée la Layer automatiquement
-    slim: true                 # supprime fichiers inutiles (tests, .pyc…)
-    strip: true                # strip des binaires
-    zip: true                  # compresse la layer
+    pythonBin: python3.12
+    dockerizePip: true
+    useStaticCache: true
     invalidateCaches: true
-    noDeploy:                  # libs déjà présentes sur l'environnement Lambda
-      - boto3
-      - botocore
-      - s3transfer
-      - urllib3
-      - jmespath
-      - docutils
+    slim: true
+    strip: true
+    layer: true          # crée automatiquement PythonRequirementsLambdaLayer
 
-  # Nettoie les anciennes versions après déploiement
+  # Garde un historique raisonnable des versions déployées
   prune:
     automatic: true
-    number: 3
+    number: 5
 
+# ---- Packaging global (léger et prédictible) -------------------------------
+package:
+  individually: true
+  patterns:
+    # Include : code Python + schémas
+    - "**/*.py"
+    - "schemas/**"
+    # Exclude : tout ce qui est inutile/volumineux
+    - "!node_modules/**"
+    - "!venv/**"
+    - "!**/__pycache__/**"
+    - "!tests/**"
+    - "!ui/**"
+    - "!.git/**"
+    - "!**/*.md"
+    - "!sls.out.yml"
+    - "!model-layer/**"   # si tu as un layer maison séparé
+
+# ---- Fonctions -------------------------------------------------------------
 functions:
   health:
     handler: handler.health
-    timeout: 6
-    # paquet minimal : n’embarque que ce qui est nécessaire
-    package:
-      patterns:
-        - '!**/*'
-        - 'handler.py'
+    timeout: 5
+    memorySize: 256
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
     events:
       - http:
           path: health
@@ -64,17 +76,10 @@ functions:
 
   predict:
     handler: handler.predict
-    timeout: 30                   # API Gateway a ~29s, donc max 30 ici
-    # ATTACHE UNIQUEMENT LA LAYER PYTHON ICI
+    timeout: 28
+    memorySize: 1024
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
-    package:
-      patterns:
-        - '!**/*'
-        - 'handler.py'
-        - 'schemas/**'            # <-- ajuste selon ton repo
-        - 'model-layer/**'        # <-- si tu gardes le modèle dans le code
-        # ajoute d'autres dossiers/fichiers nécessaires si besoin
     events:
       - http:
           path: predict
@@ -87,13 +92,13 @@ functions:
               - Content-Type
             allowCredentials: false
 
-# Sorties pratiques (URLs)
+# ---- Sorties pratiques (CloudFormation Outputs) ---------------------------
 outputs:
   ServiceEndpoint:
     Description: Base URL
     Value:
       Fn::Join:
-        - ''
+        - ""
         - - https://
           - Ref: ApiGatewayRestApi
           - .execute-api.
@@ -105,7 +110,7 @@ outputs:
     Description: Healthcheck URL
     Value:
       Fn::Join:
-        - ''
+        - ""
         - - https://
           - Ref: ApiGatewayRestApi
           - .execute-api.
@@ -118,7 +123,7 @@ outputs:
     Description: Predict URL
     Value:
       Fn::Join:
-        - ''
+        - ""
         - - https://
           - Ref: ApiGatewayRestApi
           - .execute-api.
