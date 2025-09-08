@@ -1,15 +1,4 @@
-REGION=eu-west-3
-STACK=cancer-prediction-api-dev
+{
+  "apiBase": "https://elh9s0fhdk.execute-api.eu-west-3.amazonaws.com/dev"
+}
 
-API_BASE=$(aws cloudformation describe-stacks \
-  --region "$REGION" --stack-name "$STACK" \
-  --query "Stacks[0].Outputs[?OutputKey=='ServiceEndpoint'].OutputValue | [0]" \
-  --output text | tr -d '\r' )
-API_BASE="${API_BASE%/}"
-
-jq -n --arg base "$API_BASE" '{apiBase:$base}' > ui/config.json
-
-aws s3 cp ui/config.json s3://mlopstheotiste-bucket/public/config.json \
-  --cache-control 'no-cache'
-# (optionnel) invalide CloudFront
-aws cloudfront create-invalidation --distribution-id E3E68BDJEEOMJS --paths /config.json /form_validated.html

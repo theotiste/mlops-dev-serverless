@@ -1,73 +1,89 @@
 service: cancer-prediction-api
-frameworkVersion: "4"
+frameworkVersion: '4'
+configValidationMode: error
 
 provider:
   name: aws
   runtime: python3.12
-  # ✅ on lit la région depuis l'env CI/CD mais on NE l'injecte PAS dans l'env Lambda
-  region: ${env:AWS_REGION, 'eu-west-3'}
-  stage: ${env:STAGE, 'dev'}
-
-  # API Gateway timeouts ~29s -> évite 30s côté Lambda
-  timeout: 28
+  region: ${opt:region, 'eu-west-3'}
+  stage: ${opt:stage, 'dev'}
+  architecture: x86_64
   memorySize: 512
-  architecture: x86_64   # évite les images arm64 côté CI; mets "arm64" si tu le souhaites
+  timeout: 28
 
+  # ✅ v4 : retention pour les log groups Lambda
+  logRetentionInDays: 14
+
+  # Logs API Gateway (facultatif)
   logs:
-    http: true
+    restApi: true
 
-  # ✅ PAS de variables réservées (AWS_REGION, AWS_DEFAULT_REGION, LAMBDA_*)
   environment:
-    STAGE: ${sls:stage}
-    REGION_ALIAS: ${aws:region}  # si ton code veut une variable lisible côté Lambda
+    APP_STAGE: ${self:provider.stage}   # ne pas utiliser de variables AWS_*
 
-# ---- Plugins ---------------------------------------------------------------
 plugins:
   - serverless-python-requirements
   - serverless-prune-plugin
 
 custom:
-  # Réduit la taille et met les deps Python dans une couche dédiée
+  allowedOrigins:
+    - https://form.mlopstheotiste.fr
+    - https://dbc4cwxk7wl7p.cloudfront.net
+
   pythonRequirements:
-    pythonBin: python3.12
-    dockerizePip: true
-    useStaticCache: true
-    invalidateCaches: true
+    layer: true
     slim: true
     strip: true
-    layer: true          # crée automatiquement PythonRequirementsLambdaLayer
+    zip: true
+    dockerizePip: true
+    useStaticCache: true
+    useDownloadCache: true
+    invalidateCaches: true
+    noDeploy:
+      - boto3
+      - botocore
+      - s3transfer
+      - setuptools
+      - pip
+      - wheel
+      - jmespath
+      - urllib3
+      - python-dateutil
+      - certifi
+      - idna
+      - chardet
+      - docutils
 
-  # Garde un historique raisonnable des versions déployées
   prune:
     automatic: true
-    number: 5
+    number: 3
 
-# ---- Packaging global (léger et prédictible) -------------------------------
 package:
   individually: true
   patterns:
-    # Include : code Python + schémas
-    - "**/*.py"
-    - "schemas/**"
-    # Exclude : tout ce qui est inutile/volumineux
-    - "!node_modules/**"
-    - "!venv/**"
-    - "!**/__pycache__/**"
-    - "!tests/**"
-    - "!ui/**"
-    - "!.git/**"
-    - "!**/*.md"
-    - "!sls.out.yml"
-    - "!model-layer/**"   # si tu as un layer maison séparé
+    - '!**/.git/**'
+    - '!**/__pycache__/**'
+    - '!**/*.pyc'
+    - '!**/.pytest_cache/**'
+    - '!tests/**'
+    - '!scripts/**'
+    - '!ui/**'
+    - '!node_modules/**'
+    - '!venv/**'
+    - '!slim-venv/**'
+    - '!.serverless/**'
 
-# ---- Fonctions -------------------------------------------------------------
 functions:
   health:
+    name: ${self:service}-${self:provider.stage}-health
     handler: handler.health
+    memorySize: 128
     timeout: 5
-    memorySize: 256
-    layers:
-      - { Ref: PythonRequirementsLambdaLayer }
+    package:
+      patterns:
+        - '!**/*'
+        - handler.py
+        - index.html
     events:
       - http:
           path: health
@@ -75,11 +91,19 @@ functions:
           cors: true
 
   predict:
+    name: ${self:service}-${self:provider.stage}-predict
     handler: handler.predict
+    memorySize: 2048
     timeout: 28
-    memorySize: 1024
-    layers:
-      - { Ref: PythonRequirementsLambdaLayer }
+    package:
+      patterns:
+        - '!**/*'
+        - handler.py
+        - RandomForest.pkl
+        - schemas/**         # si utilisé
+        - payload.json        # si utilisé par vos tests
+        - features_input.json # si utilisé par vos tests
+
     events:
       - http:
           path: predict
@@ -87,18 +111,18 @@ functions:
           cors:
             origins:
               - https://form.mlopstheotiste.fr
-              - https://dbc4cwxk7wl7p.cloudfront.net
+              - https://dbc4cwxk7w17p.cloudfront.net
             headers:
               - Content-Type
-            allowCredentials: false
+            allowCredentials: false 
+    
 
-# ---- Sorties pratiques (CloudFormation Outputs) ---------------------------
 outputs:
   ServiceEndpoint:
     Description: Base URL
     Value:
       Fn::Join:
-        - ""
+        - ''
         - - https://
           - Ref: ApiGatewayRestApi
           - .execute-api.
@@ -110,7 +134,7 @@ outputs:
     Description: Healthcheck URL
     Value:
       Fn::Join:
-        - ""
+        - ''
         - - https://
           - Ref: ApiGatewayRestApi
           - .execute-api.
@@ -123,7 +147,7 @@ outputs:
     Description: Predict URL
     Value:
       Fn::Join:
-        - ""
+        - ''
         - - https://
           - Ref: ApiGatewayRestApi
           - .execute-api.

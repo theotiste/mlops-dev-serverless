@@ -56,184 +56,226 @@
   </div>
 
   <script>
-    // ⛳️ Ordre EXACT des 30 features (doit correspondre au backend)
-    const FEATURE_ORDER = [
-      "radius_mean","texture_mean","perimeter_mean","area_mean","smoothness_mean",
-      "compactness_mean","concavity_mean","concave_points_mean","symmetry_mean","fractal_dimension_mean",
-      "radius_se","texture_se","perimeter_se","area_se","smoothness_se",
-      "compactness_se","concavity_se","concave_points_se","symmetry_se","fractal_dimension_se",
-      "radius_worst","texture_worst","perimeter_worst","area_worst","smoothness_worst",
-      "compactness_worst","concavity_worst","concave_points_worst","symmetry_worst","fractal_dimension_worst"
-    ];
+  // ⛳️ Ordre EXACT des 30 features (doit correspondre au backend)
+  const FEATURE_ORDER = [
+    "radius_mean","texture_mean","perimeter_mean","area_mean","smoothness_mean",
+    "compactness_mean","concavity_mean","concave_points_mean","symmetry_mean","fractal_dimension_mean",
+    "radius_se","texture_se","perimeter_se","area_se","smoothness_se",
+    "compactness_se","concavity_se","concave_points_se","symmetry_se","fractal_dimension_se",
+    "radius_worst","texture_worst","perimeter_worst","area_worst","smoothness_worst",
+    "compactness_worst","concavity_worst","concave_points_worst","symmetry_worst","fractal_dimension_worst"
+  ];
 
-    // 🔗 Endpoint d'inférence (attend un ARRAY JSON de 30 floats)
-    const API_URL = "https://api.mlopstheotiste.fr/predict";
+  // ---------- Génération des champs ----------
+  const container = document.getElementById("fields-container");
+  FEATURE_ORDER.forEach(name => {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
 
-    // --- Génération des champs ---------------------------------------------
-    const container = document.getElementById("fields-container");
-    FEATURE_ORDER.forEach(name => {
-      const wrap = document.createElement("div");
-      wrap.className = "field";
+    const label = document.createElement("label");
+    label.htmlFor = name;
+    label.textContent = name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
 
-      const label = document.createElement("label");
-      label.htmlFor = name;
-      label.textContent = name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
+    const input = document.createElement("input");
+    input.id   = name;
+    input.name = name;
+    input.type = "number";
+    input.step = "any";
+    input.inputMode = "decimal";
+    input.required = true;
 
-      const input = document.createElement("input");
-      input.id   = name;
-      input.name = name;
-      input.type = "number";
-      input.step = "any";           // évite le "17 ou 18"
-      input.inputMode = "decimal";
-      input.required = true;
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = "Ex: 12.34 ou 12,34";
 
-      const hint = document.createElement("div");
-      hint.className = "hint";
-      hint.textContent = "Ex: 12.34 ou 12,34";
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    wrap.appendChild(hint);
+    container.appendChild(wrap);
+  });
 
-      wrap.appendChild(label);
-      wrap.appendChild(input);
-      wrap.appendChild(hint);
-      container.appendChild(wrap);
-    });
+  // ---------- Utils ----------
+  function parseFloatFR(v) {
+    // supporte "1 234,56" / "1,234.56" / "1234.56"
+    if (typeof v !== "string") v = String(v ?? "");
+    v = v.replace(/\s/g, "").replace(/,/g, ".");
+    const n = Number.parseFloat(v);
+    if (!Number.isFinite(n)) throw new Error("Valeur manquante ou invalide");
+    return n;
+  }
 
-    // --- Utils --------------------------------------------------------------
-    function parseFloatFR(v){
-      if (typeof v === "string") v = v.replace(",", ".");
-      const n = Number.parseFloat(v);
-      if (Number.isNaN(n)) throw new Error("Valeur manquante ou invalide");
-      return n;
-    }
+  function showError(msg) {
+    const box = document.getElementById("error-box");
+    box.textContent = msg;
+    box.style.display = "block";
+  }
+  function clearError() {
+    const box = document.getElementById("error-box");
+    box.textContent = "";
+    box.style.display = "none";
+  }
+  const trimSlash = (s) => s.replace(/\/+$/,"");
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // Essaye d’extraire la prédiction numérique depuis divers formats
-    function pickPrediction(d){
-      if (d == null) return null;
-      if (typeof d === "number" || typeof d === "string") return d;
-      if (Array.isArray(d)) return d[0];
-      if (typeof d === "object") {
-      // ✅ cas backend actuel
-      if (Array.isArray(d.predictions)) return d.predictions[0];
-      // autres variantes possibles
-      return d.prediction ?? d.result ?? d.output ?? d.label ?? null;
+  // ---------- Résolution dynamique de l’endpoint ----------
+  let PREDICT_URL = ""; // sera résolu à l'init
+
+  async function resolvePredictUrl() {
+    // 1) Overrides via query string
+    const qs = new URL(location.href).searchParams;
+    const qsPredict = (qs.get("predictUrl") || "").trim();
+    const qsApiBase = (qs.get("apiBase")   || "").trim();
+    if (qsPredict) return qsPredict;
+    if (qsApiBase) return trimSlash(qsApiBase) + "/predict";
+
+    // 2) ui/config.json (apiBase ou predictUrl)
+    try {
+      const res = await fetch("./config.json", { cache: "no-store" });
+      if (res.ok) {
+        const cfg = await res.json();
+        if (cfg.predictUrl) return String(cfg.predictUrl).trim();
+        if (cfg.apiBase)   return trimSlash(String(cfg.apiBase)) + "/predict";
       }
-      return null;
+    } catch { /* ignore */ }
+
+    // 3) Fallback (à adapter si besoin)
+    return "https://api.mlopstheotiste.fr/predict";
+  }
+
+  // ---------- Extraction souple pred / proba ----------
+  function pickPrediction(d) {
+    if (d == null) return null;
+    if (typeof d === "number" || typeof d === "string") return d;
+    if (Array.isArray(d)) return d[0];
+    if (typeof d === "object") {
+      if (Array.isArray(d.predictions)) return d.predictions[0]; // backend actuel
+      return d.prediction ?? d.result ?? d.output ?? d.label ?? null;
+    }
+    return null;
+  }
+
+  function pickProbaOne(d) {
+    if (!d || typeof d !== "object") return null;
+
+    // clés directes courantes
+    for (const k of ["proba","probability","score","p1","proba_1"]) {
+      if (typeof d[k] === "number") return d[k];
     }
 
-    // Essaye d’extraire la probabilité (classe 1) depuis divers formats
-    function pickProbaOne(d){
-      if (!d || typeof d !== "object") return null;
-
-    // clés directes usuelles
-      if (typeof d.proba === "number") return d.proba;
-      if (typeof d.probability === "number") return d.probability;
-      if (typeof d.score === "number") return d.score;
-      if (typeof d.p1 === "number") return d.p1;
-      if (typeof d.proba_1 === "number") return d.proba_1;
-
-      // ✅ cas backend actuel: probabilities = [[p0, p1]]
-      if (Array.isArray(d.probabilities)) {
-        const arr = d.probabilities;
-      if (Array.isArray(arr[0]) && arr[0].length >= 2) return arr[0][1]; // p1
-      if (typeof arr[1] === "number") return arr[1]; // fallback [p0, p1]
-     }
-
-      // variantes: probas = [p0, p1]
-      if (Array.isArray(d.probas)) {
-        const a = d.probas;
+    // tableau nested [[p0,p1]] ou [p0,p1]
+    if (Array.isArray(d.probabilities)) {
+      const arr = d.probabilities;
+      if (Array.isArray(arr[0]) && arr[0].length >= 2) return arr[0][1];
+      if (typeof arr[1] === "number") return arr[1];
+    }
+    if (Array.isArray(d.probas)) {
+      const a = d.probas;
       if (Array.isArray(a[0]) && a[0].length >= 2) return a[0][1];
       if (typeof a[1] === "number") return a[1];
-     }
+    }
 
-      // objets { "0": p0, "1": p1 } / { benign, malign }
-      const obj = d.probabilities || d.probas || d.scores || null;
-      if (obj && typeof obj === "object") {
+    // objets { "0": p0, "1": p1 } ou { benign, malign }
+    const obj = d.probabilities || d.probas || d.scores || null;
+    if (obj && typeof obj === "object") {
       if (typeof obj["1"] === "number") return obj["1"];
-      if (typeof obj["tumeur maligne"] === "number") return obj["tumeur maligne"];
-      if (typeof obj["1"] === "number") return obj["0"];
-      if (typeof obj["tumeur bégnine"] === "number") return obj["tumeur bégnine"];
-      
-     }
-     return null;
+      if (typeof obj.malign === "number") return obj.malign;
+      if (typeof obj["malign"] === "number") return obj["malign"];
     }
+    return null;
+  }
 
+  // ---------- Soumission ----------
+  const form = document.getElementById("prediction-form");
+  const submitBtn = document.getElementById("submit-btn");
 
-    function showError(msg){
-      const box = document.getElementById("error-box");
-      box.textContent = msg;
-      box.style.display = "block";
-    }
-    function clearError(){
-      const box = document.getElementById("error-box");
-      box.textContent = "";
-      box.style.display = "none";
-    }
+  // On résout l'URL au chargement
+  (async () => { PREDICT_URL = await resolvePredictUrl(); })();
 
-    // --- Soumission ---------------------------------------------------------
-    const form = document.getElementById("prediction-form");
-    const submitBtn = document.getElementById("submit-btn");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    clearError();
 
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      clearError();
+    submitBtn.classList.add("loading");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Analyse en cours…";
 
-      // Désactive le bouton pendant l'appel
-      submitBtn.classList.add("loading");
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Analyse en cours…";
+    try {
+      // 1) Construire l'ARRAY des 30 floats (ordre exact)
+      const values = FEATURE_ORDER.map(id => {
+        const el = document.getElementById(id);
+        try {
+          return parseFloatFR(el.value.trim());
+        } catch {
+          const label = el.previousElementSibling?.textContent || id;
+          throw new Error(`Valeur invalide pour "${label}"`);
+        }
+      });
 
+      if (!PREDICT_URL) {
+        throw new Error("Endpoint de prédiction non configuré (vérifier ui/config.json ou ?apiBase= / ?predictUrl=).");
+      }
+
+      // 2) Appel API avec timeout
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 15000); // 15s
+      let res;
       try {
-        // 1) Construire l'ARRAY de 30 floats dans l'ordre exact
-        const values = FEATURE_ORDER.map(id => parseFloatFR(document.getElementById(id).value.trim()));
-
-        // 2) Appel API
-        const res = await fetch(API_URL, {
+        res = await fetch(PREDICT_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ features: values })
-
+          body: JSON.stringify({ features: values }),
+          mode: "cors",
+          signal: ctrl.signal
         });
+      } finally { clearTimeout(to); }
 
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`HTTP ${res.status} — ${txt}`);
-        }
-
-        // 3) Lire JSON
-        let data = null;
-        try { data = await res.json(); } catch { /* backend peut renvoyer du texte */ }
-
-        // 4) Extraire pred & proba
-        let pred = pickPrediction(data);
-        let proba = pickProbaOne(data);
-
-        // Normalisations
-        if (typeof pred === "string" && /^\d+(\.\d+)?$/.test(pred)) pred = Number(pred);
-        if (typeof proba === "number") {
-          if (proba > 1) proba = proba / 100;           // si % → 0..1
-          proba = Math.max(0, Math.min(1, proba));      // clamp
-        } else {
-          proba = null;
-        }
-
-        if (pred === null || pred === undefined) {
-          throw new Error("Réponse JSON sans champ de prédiction.");
-        }
-
-        // 5) Redirection vers la page résultat (inclut proba si dispo)
-        const url = new URL("/result.html", window.location.origin);
-        url.searchParams.set("prediction", String(pred));
-        if (proba !== null) url.searchParams.set("proba", String(proba));
-        window.location.href = url.toString();
-
-      } catch (err) {
-        console.error(err);
-        showError("Erreur pendant la prédiction : " + err.message);
-      } finally {
-        submitBtn.classList.remove("loading");
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Lancer la prédiction";
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} — ${txt}`);
       }
-    });
-  </script>
+
+      // 3) JSON (tolère du non-JSON)
+      let data = null;
+      try { data = await res.json(); } catch { data = { raw: await res.text().catch(()=> "") }; }
+
+      // 4) Extraire prédiction / proba (classe 1)
+      let pred = pickPrediction(data);
+      let proba = pickProbaOne(data);
+
+      if (typeof pred === "string" && /^\d+(\.\d+)?$/.test(pred)) pred = Number(pred);
+      if (typeof proba === "number") {
+        if (proba > 1) proba = proba / 100; // si % → 0..1
+        proba = Math.max(0, Math.min(1, proba));
+      } else {
+        proba = null;
+      }
+
+      if (pred === null || pred === undefined) {
+        throw new Error("Réponse JSON sans champ de prédiction.");
+      }
+
+      // 5) Sauvegarde locale pour result.html + redirection
+      try {
+        localStorage.setItem("lastPrediction", JSON.stringify({ timestamp: Date.now(), prediction: pred, proba, raw: data }));
+      } catch {}
+
+      const url = new URL("/result.html", window.location.origin);
+      url.searchParams.set("prediction", String(pred));
+      if (proba !== null) url.searchParams.set("proba", String(proba));
+      window.location.href = url.toString();
+
+    } catch (err) {
+      console.error(err);
+      const isAbort = (err && (err.name === "AbortError"));
+      const netTip  = (err && /Failed to fetch|TypeError: Failed to fetch/i.test(err.message)) ?
+        " (réseau/CORS ?)" : "";
+      showError("Erreur pendant la prédiction : " + (isAbort ? "délai dépassé." : err.message + netTip));
+    } finally {
+      submitBtn.classList.remove("loading");
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Lancer la prédiction";
+    }
+  });
+</script>
 </body>
 </html>
