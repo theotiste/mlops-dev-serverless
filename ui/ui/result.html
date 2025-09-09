@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Résultat de la prédiction</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#f5f7fb; --card:#fff; --text:#0f172a; --muted:#64748b;
+      --primary:#2563eb; --primary-dark:#1d4ed8;
+      --ok:#16a34a; --ok-bg:#dcfce7; --ok-border:#86efac;
+      --bad:#dc2626; --bad-bg:#fee2e2; --bad-border:#fecaca;
+    }
+    *{ box-sizing:border-box }
+    body{
+      margin:0; padding:40px; background:var(--bg); color:var(--text);
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    }
+    h1{ text-align:center; margin-bottom:24px }
+    .card{
+      max-width:1000px; margin:0 auto; background:var(--card); padding:28px;
+      border-radius:14px; box-shadow:0 8px 30px rgba(2,6,23,.08);
+    }
+    .pill{
+      margin:18px auto 8px; width:max-content;
+      padding:12px 18px; border-radius:999px; font-weight:700;
+      border:2px solid transparent; font-size:18px;
+    }
+    .pill.ok{ color:var(--ok); background:var(--ok-bg); border-color:var(--ok-border) }
+    .pill.bad{ color:var(--bad); background:var(--bad-bg); border-color:var(--bad-border) }
+    .meta{ text-align:center; color:var(--muted); margin-top:8px; line-height:1.5 }
+    .actions{ display:flex; gap:12px; justify-content:center; margin-top:26px; flex-wrap:wrap }
+    .btn{
+      border:none; background:var(--primary); color:#fff; padding:10px 16px;
+      border-radius:10px; cursor:pointer; font-size:15px; text-decoration:none;
+    }
+    .btn:hover{ background:var(--primary-dark) }
+    .hint{ text-align:center; color:var(--muted); font-size:13px; margin-top:16px }
+  </style>
+</head>
+<body>
+  <h1>Résultat de la prédiction</h1>
+
+  <div class="card" id="card">
+    <div id="pill" class="pill">Résultat en cours…</div>
+    <div class="meta" id="meta"></div>
+
+    <div class="actions">
+      <!-- Bouton principal : retour au formulaire et reset automatique -->
+      <a class="btn" href="/form_validated.html?reset=1">Revenir au formulaire</a>
+    </div>
+
+    <div class="hint">Conseil : revenez au formulaire, cliquez sur <b>Valeurs d’exemple</b> si besoin, puis <b>Lancer la prédiction</b>.</div>
+  </div>
+
+  <script>
+    // Utilitaires de parsing & format
+    function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+    function parseProba(p){
+      if (p == null) return null;
+      let n = Number(p);
+      if (!Number.isFinite(n)) return null;
+      if (n > 1) n = n / 100; // support d'un pourcentage
+      return clamp01(n);
+    }
+    function formatPct(p){ return (p*100).toFixed(1) + " %"; }
+
+    function normalizePrediction(raw){
+      if (raw == null) return null;
+      const s = String(raw).trim().toLowerCase();
+      if (s === "1" || s === "malign" || s === "malignant" || s === "maligne") return 1;
+      if (s === "0" || s === "benign" || s === "benigne" || s === "bénigne") return 0;
+      const n = Number(s);
+      if (Number.isFinite(n)) return n >= 0.5 ? 1 : 0;
+      return null;
+    }
+
+    // Rendu
+    (function render(){
+      const params = new URLSearchParams(location.search);
+      const pred = normalizePrediction(params.get("prediction"));
+      const proba1 = parseProba(params.get("proba")); // probabilité de la classe 1 si fournie
+
+      const pill = document.getElementById("pill");
+      const meta = document.getElementById("meta");
+
+      if (pred == null){
+        pill.className = "pill";
+        pill.textContent = "Aucune prédiction fournie";
+        meta.textContent = "Revenez au formulaire pour lancer une analyse.";
+        return;
+      }
+
+      if (pred === 1){
+        pill.className = "pill bad";
+        pill.textContent = "Tumeur maligne (1)";
+      }else{
+        pill.className = "pill ok";
+        pill.textContent = "Tumeur bénigne (0)";
+      }
+
+      const lines = [];
+      lines.push(`Valeur reçue (prediction) : ${pred}`);
+      if (proba1 != null){
+        lines.push(`Probabilité (classe 1) : ${formatPct(proba1)}`);
+        if (pred === 0) {
+          // Si la classe prédite est 0, on peut aussi afficher la proba de la classe 0
+          lines.push(`Probabilité (classe 0) : ${formatPct(1 - proba1)}`);
+        }
+      }
+      meta.innerHTML = lines.join("<br/>");
+    })();
+  </script>
+</body>
+</html>
