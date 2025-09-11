@@ -36,27 +36,46 @@ jobs:
           echo "UI_INDEX=$UI_INDEX"
           if [ -n "$AMPLIFY_WEBHOOK_URL" ]; then echo "Webhook: present"; else echo "Webhook: none"; fi
 
-      # Patch / crée ui/config.json à partir des variables
+          
+
       - name: Patch ui/config.json
         working-directory: ui
         run: |
           set -euo pipefail
-          if command -v jq >/dev/null 2>&1 && [ -f config.json ]; then
+          have_jq=false
+          
+          if command -v jq >/dev/null 2>&1; then have_jq=true; fi
+
+          if [ "${have_jq}" = "true" ] && [ -f config.json ]; then
+          # Met à jour un fichier existant
             tmp=$(mktemp)
             jq --arg api "$UI_API_BASE" --arg index "$UI_INDEX" \
-              '.api_base=$api | .index=$index' config.json > "$tmp"
+            '.api_base=$api | .index=$index' config.json > "$tmp"
             mv "$tmp" config.json
+
+          elif [ "${have_jq}" = "true" ]; then
+          # Crée un nouveau fichier propre
+            jq -n --arg api "$UI_API_BASE" --arg index "$UI_INDEX" \
+            '{api_base:$api, index:$index}' > config.json
+
           else
-            # Fallback sans jq ou si le fichier n'existe pas
-            cat > config.json <<EOF
-            {
-              "api_base": "${UI_API_BASE}",
-              "index": "${UI_INDEX}"
+          # Fallback sans jq (pas de here-doc → pas d’erreur d’indentation/CRLF)
+            python3 - <<'PY'
+            import json, os, sys
+            data = {
+              "api_base": os.environ.get("UI_API_BASE",""),
+              "index": os.environ.get("UI_INDEX","")
             }
-            EOF
+            open("config.json","w", encoding="utf-8").write(
+            json.dumps(data, indent=2, ensure_ascii=False)
+            )
+            PY
           fi
-          echo "config.json:"
+
+          echo "config.json généré :"
           cat config.json
+    
+
 
       # ---- Méthode A : Webhook (la plus simple) ----
       - name: Trigger Amplify via Webhook
