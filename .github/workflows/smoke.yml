@@ -1,0 +1,124 @@
+# .github/workflows/smoke.yml
+name: Smoke tests (UI + API)
+
+on:
+  workflow_dispatch:
+  # Exécute les tests quand vos pipelines de déploiement sont terminés avec succès
+  workflow_run:
+    workflows:
+      - "Deploy"                       # <- remplacez si le nom diffère
+      - "UI → S3 + Invalidation CF"    # <- remplacez si le nom diffère
+    types: [completed]
+
+concurrency:
+  group: smoke-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      API_BASE: ${{ vars.API_BASE || secrets.API_BASE }}
+      UI_BASE:  ${{ vars.UI_BASE  || secrets.UI_BASE  }}
+      API_HEALTH_PATH: /health
+      API_PREDICT_PATH: /predict
+
+    steps:
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          test -n "${API_BASE:-}" || { echo "Missing API_BASE (Actions variables or secrets)"; exit 1; }
+          test -n "${UI_BASE:-}"  || { echo "Missing UI_BASE  (Actions variables or secrets)"; exit 1; }
+          echo "API_BASE=${API_BASE}"
+          echo "UI_BASE=${UI_BASE}"
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      # ---------- API: /health ----------
+      - name: API health check
+        run: |
+          set -euo pipefail
+          URL="${API_BASE%/}${API_HEALTH_PATH}"
+          echo "GET ${URL}"
+          code=$(curl -fsS -m 20 -w "%{http_code}" -o /tmp/health.json "$URL" || true)
+          test "$code" = "200" || { echo "HTTP $code on /health"; cat /tmp/health.json || true; exit 1; }
+          cat /tmp/health.json
+          jq -e '.ok == true' /tmp/health.json >/dev/null || { echo "Health JSON invalid (missing ok:true)"; exit 1; }
+
+      # ---------- API: /predict ----------
+      - name: Build smoke payload (30 floats)
+        run: |
+          set -euo pipefail
+          # Un échantillon neutre : l’objectif est d’obtenir une 200 + un JSON structuré,
+          # pas de valider la classe exacte.
+          cat > /tmp/payload.json <<'JSON'
+          {
+            "features": [
+              14.5, 20.1, 95.5, 700.0, 0.10, 0.11, 0.08, 0.05, 0.18, 0.060,
+              0.50, 1.10, 3.50, 40.0, 0.006, 0.020, 0.025, 0.010, 0.020, 0.003,
+              16.5, 22.1, 110.0, 900.0, 0.13, 0.18, 0.20, 0.12, 0.28, 0.080
+            ]
+          }
+          JSON
+          jq . /tmp/payload.json
+
+      - name: API predict check
+        run: |
+          set -euo pipefail
+          URL="${API_BASE%/}${API_PREDICT_PATH}"
+          echo "POST ${URL}"
+          code=$(curl -fsS -m 30 -H "Content-Type: application/json" -d @/tmp/payload.json -w "%{http_code}" -o /tmp/predict.json "$URL" || true)
+          test "$code" = "200" || { echo "HTTP $code on /predict"; cat /tmp/predict.json || true; exit 1; }
+          cat /tmp/predict.json
+
+          # Valide la structure: predictions présent et non vide
+          jq -e '.predictions | type=="array" and (length>=1)' /tmp/predict.json >/dev/null
+
+          # Probabilités (si présentes): tableau de tableaux [[p0,p1]]
+          jq -e '(.probabilities == null) or ((.probabilities|type=="array") and (.probabilities|length>=1) and (.probabilities[0]|length>=1))' /tmp/predict.json >/dev/null
+
+          # Si proba au format [[p0,p1]] => vérifier range 0..1
+          if jq -e '.probabilities != null' /tmp/predict.json >/dev/null; then
+            jq -e '[.probabilities[][]] | all(. >= 0 and . <= 1)' /tmp/predict.json >/dev/null
+          fi
+
+      # ---------- UI: disponibilité ----------
+      - name: UI index check (HTML page reachable)
+        run: |
+          set -euo pipefail
+          HTML="${UI_BASE%/}/form_validated.html"
+          echo "HEAD ${HTML}"
+          # On retry un peu si CloudFront vient d’être invalidé
+          for i in {1..5}; do
+            code=$(curl -fsS -m 20 -o /dev/null -w "%{http_code}" -I "$HTML" || true)
+            if [ "$code" = "200" ]; then
+              echo "OK 200"
+              break
+            fi
+            echo "Try $i: got HTTP ${code:-N/A}; retry in 5s…"
+            sleep 5
+          done
+          test "$code" = "200" || { echo "UI not reachable: code=$code"; exit 1; }
+
+      - name: UI config.json check
+        run: |
+          set -euo pipefail
+          CFG="${UI_BASE%/}/config.json"
+          echo "GET ${CFG}"
+          curl -fsS -m 20 "$CFG" -o /tmp/config.json
+          cat /tmp/config.json
+          jq -e '.api_base and .index' /tmp/config.json >/dev/null
+
+      # ---------- Résumé job ----------
+      - name: Summary
+        run: |
+          echo "✅ Smoke tests passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- API: ${API_BASE}" >> $GITHUB_STEP_SUMMARY
+          echo "- UI : ${UI_BASE}"  >> $GITHUB_STEP_SUMMARY
