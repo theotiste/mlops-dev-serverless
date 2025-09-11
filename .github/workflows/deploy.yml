@@ -1,150 +1,126 @@
-name: Deploy backend (Serverless + static AWS keys)
+name: Deploy backend + trigger Amplify
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
+    # redeploy when backend or UI changes
     paths:
-      - "serverless.yml"
-      - "serverless.yaml"
-      - "handler.py"
-      - "model-layer/**"
-      - "schemas/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/deploy.yml"
+      - 'serverless.yaml'
+      - 'handler.*'
+      - 'requirements.txt'
+      - 'ui/**'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: deploy-${{ github.ref }}-dev
-  cancel-in-progress: true
 
 env:
   STAGE: dev
-  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_REGION: eu-west-3
 
-  
-# .github/workflows/deploy.yml  (extrait)
 jobs:
-  deploy:
+  backend:
+    name: Serverless deploy
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-          cache: 'npm'
+          node-version: '18'
 
-      # >>> CRÉDENTIALES AWS <<<
-      - name: Configure AWS credentials (static keys)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
-          # si vous utilisez des clés temporaires (STS), ajoutez :
-          # aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
-
-      # (optionnel) Vérifie qu’on est bien authentifié
-      - name: Who am I on AWS?
-        run: aws sts get-caller-identity
-
-      - name: Install Node deps (plugins Serverless, etc.)
+      - name: Install Node deps (if present)
         run: |
-          if [ -f package.json ]; then npm ci; fi
-
-      - name: Print resolved Serverless config
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4 print --stage "$STAGE" --region "$AWS_REGION"
-
-      - name: Deploy
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4.18.2 print --stage "$STAGE" --region "$AWS_REGION"
-       
-
-      - name: Deploy
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4.18.2 deploy --stage "$STAGE" --region "$AWS_REGION"  
-      
-      - name: Smoke test
-        shell: bash
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-
-          STACK="cancer-prediction-api-${STAGE}"
-
-          # Récupère les URLs directement depuis les Outputs CFN (HealthUrl & PredictUrl)
-          HEALTH_URL="$(aws cloudformation describe-stacks \
-            --region "$AWS_REGION" \
-            --stack-name "$STACK" \
-            --query 'Stacks[0].Outputs[?OutputKey==`HealthUrl`].OutputValue' \
-            --output text)"
-
-          PREDICT_URL="$(aws cloudformation describe-stacks \
-            --region "$AWS_REGION" \
-            --stack-name "$STACK" \
-            --query 'Stacks[0].Outputs[?OutputKey==`PredictUrl`].OutputValue' \
-            --output text)"
-
-          echo "Health : $HEALTH_URL"
-          echo "Predict: $PREDICT_URL"
-
-          # 1) /health (GET)
-          echo "🔎 GET /health"
-          curl -fsS -i "$HEALTH_URL" | sed -n '1,10p'  # court aperçu
-          curl -fsS "$HEALTH_URL" | jq -e '.ok == true' >/dev/null
-
-          # 2) payload pour /predict
-          #   - si features_input.json contient déjà { "features": [...] }, on normalise
-          #   - sinon on considère que c'est un tableau brut de 30 nombres
-          if [ -f features_input.json ]; then
-            jq '{features: (.features // . | map(tonumber))}' features_input.json > payload.json
-          elif [ -f features_input_named.json ]; then
-            # Optionnel: si tu fournis un objet nommé -> on ordonne pas ici (garde simple)
-            jq '{features: (.features // (to_entries|map(.value)|map(tonumber)))}' features_input_named.json > payload.json
-          else
-            echo "❌ Aucun fichier d'entrée (features_input.json) trouvé" >&2
-            exit 1
+          if [ -f package-lock.json ] || [ -f package.json ]; then
+            npm ci || npm i
           fi
 
-          # 3) POST /predict
-          echo "🚀 POST /predict"
-          RESP="$(curl -fsS -H "Content-Type: application/json" --data-binary @payload.json "$PREDICT_URL")"
-          echo "$RESP" | jq .
+      - name: Docker warm-up (for serverless-python-requirements)
+        run: |
+          docker --version
+          sudo systemctl start docker || true
+          # Pulling a common SAM image avoids cold pulls during deploy
+          docker pull public.ecr.aws/sam/build-python3.12:latest-arm64 || true
 
-          # Check minimal: présence de predictions[] OU probabilities[]
-          echo "$RESP" | jq -e 'has("predictions") or has("probabilities")' >/dev/null
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          # or, if you don't use OIDC/role:
+          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-          # Résumé (Job Summary)
-          {
-            echo "## Smoke test (stage: ${STAGE})"
-            echo ""
-            echo "**Health**  : $HEALTH_URL"
-            echo "**Predict** : $PREDICT_URL"
-            echo ""
-            echo "### Exemple de réponse"
-            echo ""
-            echo '```json'
-            echo "$RESP" | jq .
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Deploy with Serverless
+        run: |
+          npx -y serverless@4 deploy \
+            --stage "$STAGE" \
+            --region "$AWS_REGION" \
+            --verbose
 
-      - name: Prune old deployments (keep last 3)
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4 prune -n 3 --stage "$STAGE" --region "$AWS_REGION"
+      - name: Show stack info
+        run: |
+          npx -y serverless@4 info \
+            --stage "$STAGE" \
+            --region "$AWS_REGION" || true
+
+  frontend:
+    name: Trigger Amplify build
+    needs: backend
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials (only for CLI method)
+        if: secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          # or AK/SK if you prefer
+
+      # ---- Method A: Webhook (simplest) ----
+      - name: Trigger Amplify via Webhook
+        if: secrets.AMPLIFY_WEBHOOK_URL != ''
+        run: |
+          curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"trigger":"github-actions"}' \
+            "${{ secrets.AMPLIFY_WEBHOOK_URL }}"
+
+      # ---- Method B: AWS CLI (triggers & waits) ----
+      - name: Trigger Amplify via CLI
+        if: secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''
+        id: start
+        run: |
+          JOB_JSON=$(aws amplify start-job \
+            --app-id "${{ secrets.AMPLIFY_APP_ID }}" \
+            --branch-name "${{ secrets.AMPLIFY_BRANCH }}" \
+            --job-type RELEASE)
+          echo "$JOB_JSON"
+          JOB_ID=$(echo "$JOB_JSON" | jq -r '.jobSummary.jobId')
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Amplify job to finish
+        if: steps.start.outputs.job_id != ''
+        run: |
+          APP_ID="${{ secrets.AMPLIFY_APP_ID }}"
+          BRANCH="${{ secrets.AMPLIFY_BRANCH }}"
+          JOB_ID="${{ steps.start.outputs.job_id }}"
+          echo "Waiting for Amplify job $JOB_ID on $BRANCH"
+          for i in {1..60}; do
+            STATUS=$(aws amplify get-job \
+              --app-id "$APP_ID" \
+              --branch-name "$BRANCH" \
+              --job-id "$JOB_ID" \
+              | jq -r '.job.summary.status')
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "SUCCEED" ]; then exit 0; fi
+            if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "CANCELLED" ]; then exit 1; fi
+            sleep 10
+          done
+          echo "Timeout waiting Amplify job"; exit 1
