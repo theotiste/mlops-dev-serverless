@@ -36,46 +36,30 @@ jobs:
           echo "UI_INDEX=$UI_INDEX"
           if [ -n "$AMPLIFY_WEBHOOK_URL" ]; then echo "Webhook: present"; else echo "Webhook: none"; fi
 
-          
-
-      - name: Patch ui/config.json
+      - name: Patch ui/config.json (no heredoc)
         working-directory: ui
+        shell: bash
+        env:
+          UI_API_BASE: ${{ vars.UI_API_BASE || secrets.UI_API_BASE }}
+          UI_INDEX:    ${{ vars.UI_INDEX    || 'form_validated.html' }}
         run: |
           set -euo pipefail
-          have_jq=false
-          
-          if command -v jq >/dev/null 2>&1; then have_jq=true; fi
 
-          if [ "${have_jq}" = "true" ] && [ -f config.json ]; then
-          # Met à jour un fichier existant
-            tmp=$(mktemp)
-            jq --arg api "$UI_API_BASE" --arg index "$UI_INDEX" \
-            '.api_base=$api | .index=$index' config.json > "$tmp"
-            mv "$tmp" config.json
-
-          elif [ "${have_jq}" = "true" ]; then
-          # Crée un nouveau fichier propre
+          if command -v jq >/dev/null 2>&1; then
+          # jq présent sur les runners Ubuntu → on l'utilise
             jq -n --arg api "$UI_API_BASE" --arg index "$UI_INDEX" \
-            '{api_base:$api, index:$index}' > config.json
-
+              '{api_base:$api, index:$index}' > config.json
           else
-          # Fallback sans jq (pas de here-doc → pas d’erreur d’indentation/CRLF)
-            python3 - <<'PY'
-            import json, os, sys
-            data = {
-              "api_base": os.environ.get("UI_API_BASE",""),
-              "index": os.environ.get("UI_INDEX","")
-            }
-            open("config.json","w", encoding="utf-8").write(
-            json.dumps(data, indent=2, ensure_ascii=False)
-            )
-            PY
+          # Fallback Python en une seule ligne (sans heredoc)
+            python3 -c 'import json,os; open("config.json","w",encoding="utf-8").write(
+            json.dumps({"api_base":os.environ.get("UI_API_BASE",""),
+                    "index":os.environ.get("UI_INDEX","")},
+                    ensure_ascii=False, indent=2))'
           fi
 
-          echo "config.json généré :"
+          echo "---- ui/config.json ----"
           cat config.json
     
-
 
       # ---- Méthode A : Webhook (la plus simple) ----
       - name: Trigger Amplify via Webhook
@@ -91,7 +75,7 @@ jobs:
         if: ${{ env.AMPLIFY_WEBHOOK_URL == '' && env.AMPLIFY_APP_ID != '' && env.AMPLIFY_BRANCH != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region:     ${{ env.AWS_REGION }}
+          aws-region:     ${{ env.AWS_REGION
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
 
       - name: Start Amplify job (RELEASE)
