@@ -1,12 +1,10 @@
 {
   "name": "mlops-dev-serverless",
-  "version": "1.0.0",
   "private": true,
-  "license": "MIT",
-  "description": "",
-  "engines": {
-    "node": ">=18"
-  },
+  "devDependencies": {
+    "serverless-python-requirements": "^6.0.0"
+  }
+},
   "scripts": {
     "deploy": "serverless deploy --stage dev --region eu-west-3",
     "remove": "serverless remove --stage dev --region eu-west-3",
