@@ -1,180 +1,133 @@
-name: Deploy (Serverless + Amplify)
+name: Deploy (Serverless backend)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
     paths:
       - "serverless.yaml"
       - "handler.py"
       - "requirements.txt"
-      - "ui/**"
-      - ".github/workflows/deploy.yml"
+      - "**/*.py"
+      - ".github/workflows/deploy.yaml"
   workflow_dispatch:
+    inputs:
+      stage:
+        description: "Stage Serverless"
+        required: false
+        default: "dev"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: deploy-backend-${{ github.ref_name }}
   cancel-in-progress: true
-
-env:
-  STAGE: dev
-  AWS_REGION: eu-west-3
-  AMPLIFY_REGION: eu-west-3
-  SLS_TELEMETRY_DISABLED: "1"
-  NODE_OPTIONS: --max-old-space-size=4096
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write   # pour OIDC
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
 
-      # Node requis pour installer les plugins Serverless
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      # Installe le plugin déclaré dans package.json
-      - name: Install Node deps (plugins Serverless)
-        run: npm ci
-
-      # Python requis par serverless-python-requirements
-      - name: Setup Python (same as your Lambda runtime)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      # (si tu utilises OIDC + un rôle IAM)
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: eu-west-3
-
-      # Déploiement
-      - name: Deploy with Serverless
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4 deploy --stage dev --region eu-west-3
-
-
-  frontend:
-    name: Trigger Amplify build
-    needs: deploy
-    runs-on: ubuntu-latest
+    # Permissions nécessaires pour OIDC (assume role)
     permissions:
       id-token: write
       contents: read
+
+    env:
+      # --- Paramètres déploiement ---
+      AWS_REGION: eu-west-3
+      STAGE: ${{ github.event.inputs.stage || 'dev' }}
+      PY_VERSION: "3.12"
+      SERVERLESS_VERSION: "4"         # acceptera la dernière 4.x
+
+      # --- Secrets (doivent être créés dans GitHub > Settings > Secrets and variables) ---
+      AWS_ROLE_ARN:            ${{ secrets.AWS_ROLE_ARN }}            # OIDC (recommandé)
+      AWS_ACCESS_KEY_ID:       ${{ secrets.AWS_ACCESS_KEY_ID }}       # fallback si pas d'OIDC
+      AWS_SECRET_ACCESS_KEY:   ${{ secrets.AWS_SECRET_ACCESS_KEY }}   # fallback si pas d'OIDC
+      SERVERLESS_ACCESS_KEY:   ${{ secrets.SERVERLESS_ACCESS_KEY }}   # clé Serverless Framework
+      AMPLIFY_WEBHOOK_URL:     ${{ secrets.AMPLIFY_WEBHOOK_URL }}     # optionnel
+
+      # Qualité de vie
+      SLS_TELEMETRY_DISABLED: "1"
+      NODE_OPTIONS: "--max-old-space-size=4096"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Calcule les flags (webhook / api / auth)
-      - name: Compute Amplify flags
-        id: flags
-        env:
-          AMPLIFY_WEBHOOK_URL: ${{ secrets.AMPLIFY_WEBHOOK_URL }}
-          AMPLIFY_APP_ID:      ${{ secrets.AMPLIFY_APP_ID }}
-          AMPLIFY_BRANCH:      ${{ secrets.AMPLIFY_BRANCH }}
-          AWS_ROLE_ARN:        ${{ secrets.AWS_ROLE_ARN }}
-          AWS_ACCESS_KEY_ID:   ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      # ---------- Pré-validation claire des secrets ----------
+      - name: Validate required secrets/inputs
+        shell: bash
         run: |
-          have_webhook=false
-          have_amplify_api=false
-          use_role=false
-          use_keys=false
-
-          [ -n "${AMPLIFY_WEBHOOK_URL}" ] && have_webhook=true
-          if [ -n "${AMPLIFY_APP_ID}" ] && [ -n "${AMPLIFY_BRANCH}" ]; then
-            have_amplify_api=true
+          set -euo pipefail
+          echo "Stage: ${STAGE}, Region: ${AWS_REGION}"
+          if [[ -z "${SERVERLESS_ACCESS_KEY}" ]]; then
+            echo "::error::Missing SERVERLESS_ACCESS_KEY (Serverless Framework access key)."
+            exit 1
           fi
-          [ -n "${AWS_ROLE_ARN}" ] && use_role=true
-          if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ]; then
-            use_keys=true
+          if [[ -z "${AWS_ROLE_ARN}" && ( -z "${AWS_ACCESS_KEY_ID}" || -z "${AWS_SECRET_ACCESS_KEY}" ) ]]; then
+            echo "::error::Provide either AWS_ROLE_ARN (OIDC) OR AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY."
+            exit 1
           fi
+          echo "Secrets look OK."
 
-          echo "have_webhook=$have_webhook"   >> "$GITHUB_OUTPUT"
-          echo "have_amplify_api=$have_amplify_api" >> "$GITHUB_OUTPUT"
-          echo "use_role=$use_role"           >> "$GITHUB_OUTPUT"
-          echo "use_keys=$use_keys"           >> "$GITHUB_OUTPUT"
+      # ---------- Auth AWS ----------
+      - name: Configure AWS credentials (OIDC)
+        if: env.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          output-credentials: true
 
-      # 2) Méthode A : Webhook
-      - name: Trigger Amplify via Webhook
-        if: ${{ steps.flags.outputs.have_webhook == 'true' }}
-        env:
-          AMPLIFY_WEBHOOK_URL: ${{ secrets.AMPLIFY_WEBHOOK_URL }}
+      - name: Configure AWS credentials (access keys fallback)
+        if: env.AWS_ROLE_ARN == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+          output-credentials: true
+
+      # ---------- Toolchain ----------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VERSION }}
+
+      # ---------- Dépendances Serverless / plugins ----------
+      # Si ton repo contient package-lock.json, npm ci utilisera le lockfile. Sinon fallback npm i.
+      - name: Install Node deps (plugins Serverless)
+        shell: bash
         run: |
-          echo "Trigger Amplify via webhook…"
-          curl -sS -X POST \
+          set -euo pipefail
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm i
+          fi
+          # Garde le plugin en devDependency dans package.json, mais on force ici si absent
+          npm i -D serverless-python-requirements@^6
+
+      # ---------- Déploiement ----------
+      - name: Deploy with Serverless
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ env.SERVERLESS_ACCESS_KEY }}
+        run: |
+          npx -y serverless@${SERVERLESS_VERSION} deploy \
+            --stage ${STAGE} \
+            --region ${AWS_REGION}
+
+      # ---------- (Optionnel) délenche Amplify si webhook fourni ----------
+      - name: Trigger Amplify (webhook)
+        if: env.AMPLIFY_WEBHOOK_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -X POST \
             -H "Content-Type: application/json" \
-            -d '{"trigger":"github-actions","commit":"'"$GITHUB_SHA"'"}' \
+            -d '{"trigger":"github-actions"}' \
             "${AMPLIFY_WEBHOOK_URL}"
-
-      # 3) Si pas de webhook mais API dispo → configure AWS
-      - name: Configure AWS (OIDC role)
-        if: ${{ steps.flags.outputs.have_webhook != 'true' && steps.flags.outputs.have_amplify_api == 'true' && steps.flags.outputs.use_role == 'true' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AMPLIFY_REGION }}
-
-      - name: Configure AWS (access keys)
-        if: ${{ steps.flags.outputs.have_webhook != 'true' && steps.flags.outputs.have_amplify_api == 'true' && steps.flags.outputs.use_role != 'true' && steps.flags.outputs.use_keys == 'true' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AMPLIFY_REGION }}
-
-      # 4) Méthode B : API Amplify (fallback)
-      - name: Start Amplify RELEASE job
-        id: start
-        if: ${{ steps.flags.outputs.have_webhook != 'true' && steps.flags.outputs.have_amplify_api == 'true' }}
-        env:
-          AMPLIFY_APP_ID: ${{ secrets.AMPLIFY_APP_ID }}
-          AMPLIFY_BRANCH: ${{ secrets.AMPLIFY_BRANCH }}
-          AMPLIFY_REGION: ${{ env.AMPLIFY_REGION }}
-        run: |
-          echo "Starting Amplify RELEASE job on app ${AMPLIFY_APP_ID}, branch ${AMPLIFY_BRANCH}"
-          JOB_JSON=$(aws amplify start-job \
-            --region "${AMPLIFY_REGION}" \
-            --app-id "${AMPLIFY_APP_ID}" \
-            --branch-name "${AMPLIFY_BRANCH}" \
-            --job-type RELEASE \
-            --commit-id "${GITHUB_SHA}")
-          echo "$JOB_JSON"
-          JOB_ID=$(echo "$JOB_JSON" | jq -r '.jobSummary.jobId')
-          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for Amplify job
-        if: ${{ steps.start.outputs.job_id != '' }}
-        env:
-          AMPLIFY_APP_ID: ${{ secrets.AMPLIFY_APP_ID }}
-          AMPLIFY_BRANCH: ${{ secrets.AMPLIFY_BRANCH }}
-          AMPLIFY_REGION: ${{ env.AMPLIFY_REGION }}
-          JOB_ID: ${{ steps.start.outputs.job_id }}
-        run: |
-          echo "Waiting Amplify job ${JOB_ID}…"
-          for i in $(seq 1 120); do
-            STATUS=$(aws amplify get-job \
-              --region "${AMPLIFY_REGION}" \
-              --app-id "${AMPLIFY_APP_ID}" \
-              --branch-name "${AMPLIFY_BRANCH}" \
-              --job-id "${JOB_ID}" \
-              --query 'job.summary.status' --output text 2>/dev/null || echo "UNKNOWN")
-            echo "[$i] status: $STATUS"
-            case "$STATUS" in
-              SUCCEED) exit 0 ;;
-              FAILED|CANCELLED) echo "Amplify job failed ($STATUS)"; exit 1 ;;
-            esac
-            sleep 10
-          done
-          echo "Timeout waiting Amplify job"
-          exit 1
+          echo "Amplify webhook triggered."
