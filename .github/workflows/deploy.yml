@@ -66,61 +66,49 @@ jobs:
           npx -y serverless@4 info \
             --stage "$STAGE" \
             --region "$AWS_REGION" || true
-
-  frontend:
-    name: Trigger Amplify build
+            
+frontend:
+  name: Trigger Amplify build
     needs: backend
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Configure AWS credentials (only for CLI method)
-        if: ${{secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''}}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          # or AK/SK if you prefer
 
-      # ---- Method A: Webhook (simplest) ----
-      - name: Trigger Amplify via Webhook
-        if: ${{secrets.AMPLIFY_WEBHOOK_URL != ''}}
+  permissions:
+    id-token: write
+    contents: read
+
+  # <<< on expose les secrets dans env >>>
+  env:
+    AMPLIFY_WEBHOOK_URL: ${{ secrets.AMPLIFY_WEBHOOK_URL }}
+    AMPLIFY_APP_ID:      ${{ secrets.AMPLIFY_APP_ID }}
+    AMPLIFY_BRANCH:      ${{ secrets.AMPLIFY_BRANCH }}
+    AWS_REGION:          ${{ secrets.AWS_REGION }}
+    AWS_ROLE_ARN:        ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+  steps:
+  # ---- Méthode A : Webhook (simple) ----
+    - name: Trigger Amplify via Webhook
+        if: env.AMPLIFY_WEBHOOK_URL != ''
         run: |
           curl -s -X POST \
-            -H "Content-Type: a{{pplication/json" \
+            -H "Content-Type: application/json" \
             -d '{"trigger":"github-actions"}' \
-            "${{ secrets.AMPLIFY_WEBHOOK_URL }}"
+            "$AMPLIFY_WEBHOOK_URL"
 
-      # ---- Method B: AWS CLI (triggers & waits) ----
-      - name: Trigger Amplify via CLI
-        if: ${{secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''}}
-        id: start
-        run: |
-          JOB_JSON=$(aws amplify start-job \
-            --app-id "${{ secrets.AMPLIFY_APP_ID }}" \
-            --branch-name "${{ secrets.AMPLIFY_BRANCH }}" \
-            --job-type RELEASE)
-          echo "$JOB_JSON"
-          JOB_ID=$(echo "$JOB_JSON" | jq -r '.jobSummary.jobId')
-          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+  # ---- Méthode B : CLI/SDK (si pas de webhook) ----
+    - name: Configure AWS credentials for CLI
+        if: env.AMPLIFY_WEBHOOK_URL == '' && env.AMPLIFY_APP_ID != '' && env.AMPLIFY_BRANCH != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region:       ${{ env.AWS_REGION }}
+          role-to-assume:   ${{ env.AWS_ROLE_ARN }}
 
-      - name: Wait for Amplify job to finish
-        if: steps.start.outputs.job_id != ''
+    - name: Start Amplify job (RELEASE)
+        if: env.AMPLIFY_WEBHOOK_URL == '' && env.AMPLIFY_APP_ID != '' && env.AMPLIFY_BRANCH != ''
         run: |
-          APP_ID="${{ secrets.AMPLIFY_APP_ID }}"
-          BRANCH="${{ secrets.AMPLIFY_BRANCH }}"
-          JOB_ID="${{ steps.start.outputs.job_id }}"
-          echo "Waiting for Amplify job $JOB_ID on $BRANCH"
-          for i in {1..60}; do
-            STATUS=$(aws amplify get-job \
-              --app-id "$APP_ID" \
-              --branch-name "$BRANCH" \
-              --job-id "$JOB_ID" \
-              | jq -r '.job.summary.status')
-            echo "Status: $STATUS"
-            if [ "$STATUS" = "SUCCEED" ]; then exit 0; fi
-            if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "CANCELLED" ]; then exit 1; fi
-            sleep 10
-          done
-          echo "Timeout waiting Amplify job"; exit 1
+          aws amplify start-job \
+            --app-id "$AMPLIFY_APP_ID" \
+            --branch-name "$AMPLIFY_BRANCH" \
+            --job-type RELEASE
+           
+
+ 
