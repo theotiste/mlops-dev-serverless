@@ -1,133 +1,92 @@
-name: Deploy (Serverless backend)
+# .github/workflows/deploy.yaml
+name: Deploy API (Serverless)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
     paths:
+      - "serverless.yml"
       - "serverless.yaml"
       - "handler.py"
       - "requirements.txt"
-      - "**/*.py"
+      - "package.json"
+      - "package-lock.json"
+      - "src/**"
       - ".github/workflows/deploy.yaml"
   workflow_dispatch:
-    inputs:
-      stage:
-        description: "Stage Serverless"
-        required: false
-        default: "dev"
 
-concurrency:
-  group: deploy-backend-${{ github.ref_name }}
-  cancel-in-progress: true
+permissions:
+  id-token: write      # OIDC vers AWS
+  contents: read
+
+env:
+  STAGE: dev
+  AWS_REGION: eu-west-3
+  # Evite la télémétrie et les prompts en CI
+  SLS_TELEMETRY_DISABLED: "1"
+  SLS_NOTIFICATION_MODE: error
+  # Access key Serverless v4 (Dashboard)
+  SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
 
 jobs:
   deploy:
+    name: Deploy with Serverless
     runs-on: ubuntu-latest
-
-    # Permissions nécessaires pour OIDC (assume role)
-    permissions:
-      id-token: write
-      contents: read
-
-    env:
-      # --- Paramètres déploiement ---
-      AWS_REGION: eu-west-3
-      STAGE: ${{ github.event.inputs.stage || 'dev' }}
-      PY_VERSION: "3.12"
-      SERVERLESS_VERSION: "4"         # acceptera la dernière 4.x
-
-      # --- Secrets (doivent être créés dans GitHub > Settings > Secrets and variables) ---
-      AWS_ROLE_ARN:            ${{ secrets.AWS_ROLE_ARN }}            # OIDC (recommandé)
-      AWS_ACCESS_KEY_ID:       ${{ secrets.AWS_ACCESS_KEY_ID }}       # fallback si pas d'OIDC
-      AWS_SECRET_ACCESS_KEY:   ${{ secrets.AWS_SECRET_ACCESS_KEY }}   # fallback si pas d'OIDC
-      SERVERLESS_ACCESS_KEY:   ${{ secrets.SERVERLESS_ACCESS_KEY }}   # clé Serverless Framework
-      AMPLIFY_WEBHOOK_URL:     ${{ secrets.AMPLIFY_WEBHOOK_URL }}     # optionnel
-
-      # Qualité de vie
-      SLS_TELEMETRY_DISABLED: "1"
-      NODE_OPTIONS: "--max-old-space-size=4096"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Pré-validation claire des secrets ----------
-      - name: Validate required secrets/inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Stage: ${STAGE}, Region: ${AWS_REGION}"
-          if [[ -z "${SERVERLESS_ACCESS_KEY}" ]]; then
-            echo "::error::Missing SERVERLESS_ACCESS_KEY (Serverless Framework access key)."
-            exit 1
-          fi
-          if [[ -z "${AWS_ROLE_ARN}" && ( -z "${AWS_ACCESS_KEY_ID}" || -z "${AWS_SECRET_ACCESS_KEY}" ) ]]; then
-            echo "::error::Provide either AWS_ROLE_ARN (OIDC) OR AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY."
-            exit 1
-          fi
-          echo "Secrets look OK."
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
 
-      # ---------- Auth AWS ----------
+      - name: Use Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # --- Auth AWS via OIDC (recommandé) ---
       - name: Configure AWS credentials (OIDC)
-        if: env.AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           output-credentials: true
 
-      - name: Configure AWS credentials (access keys fallback)
-        if: env.AWS_ROLE_ARN == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
-          output-credentials: true
+      # --- Dépendances ---
+      - name: Install Node deps (for Serverless + plugins)
+        run: npm ci
 
-      # ---------- Toolchain ----------
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
+      # Si ton plugin serverless-python-requirements construit en local,
+      # Python/pip doivent être présents (déjà via setup-python).
+      # Tu n'as rien à installer ici pour le plugin : il vient de npm.
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PY_VERSION }}
-
-      # ---------- Dépendances Serverless / plugins ----------
-      # Si ton repo contient package-lock.json, npm ci utilisera le lockfile. Sinon fallback npm i.
-      - name: Install Node deps (plugins Serverless)
-        shell: bash
+      - name: Print versions
         run: |
-          set -euo pipefail
-          if [[ -f package-lock.json ]]; then
-            npm ci
-          else
-            npm i
-          fi
-          # Garde le plugin en devDependency dans package.json, mais on force ici si absent
-          npm i -D serverless-python-requirements@^6
+          node -v
+          python --version
+          npx serverless@4 --version
 
-      # ---------- Déploiement ----------
-      - name: Deploy with Serverless
+      # --- Déploiement ---
+      - name: Serverless deploy
+        run: |
+          npx serverless@4 deploy \
+            --stage "${STAGE}" \
+            --region "${AWS_REGION}" \
+            --conceal
         env:
+          # Pour être explicite si tu veux overrider la région depuis les secrets
+          AWS_REGION: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+          # (déjà injectée au niveau env global)
           SERVERLESS_ACCESS_KEY: ${{ env.SERVERLESS_ACCESS_KEY }}
-        run: |
-          npx -y serverless@${SERVERLESS_VERSION} deploy \
-            --stage ${STAGE} \
-            --region ${AWS_REGION}
 
-      # ---------- (Optionnel) délenche Amplify si webhook fourni ----------
-      - name: Trigger Amplify (webhook)
-        if: env.AMPLIFY_WEBHOOK_URL != ''
-        shell: bash
+      # --- Infos post-déploiement (endpoints, layers, etc.) ---
+      - name: Serverless info
+        if: always()
         run: |
-          set -euo pipefail
-          curl -fsSL -X POST \
-            -H "Content-Type: application/json" \
-            -d '{"trigger":"github-actions"}' \
-            "${AMPLIFY_WEBHOOK_URL}"
-          echo "Amplify webhook triggered."
+          npx serverless@4 info \
+            --stage "${STAGE}" \
+            --region "${AWS_REGION}" || true
