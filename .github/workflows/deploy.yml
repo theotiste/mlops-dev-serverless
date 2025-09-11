@@ -76,17 +76,28 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup Node.js
+          # … étapes précédentes …
+
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
+        node-version: '20'
+        cache: 'npm'
 
-      - name: Install npm deps (if present)
+      - name: Install Node deps (plugins Serverless)
+        run: npm ci
+
+       # le plugin utilise pip : alignez la version avec votre runtime Lambda
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Deploy with Serverless
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: |
-          if [ -f package.json ]; then
-            npm ci
-          fi
+          npx -y serverless@4 deploy --stage dev --region eu-west-3
 
       - name: Deploy with Serverless
         run: |
