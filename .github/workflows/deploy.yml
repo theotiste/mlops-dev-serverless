@@ -76,7 +76,7 @@ jobs:
       contents: read
     steps:
       - name: Configure AWS credentials (only for CLI method)
-        if: secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''
+        if: ${{secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''}}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
@@ -85,16 +85,16 @@ jobs:
 
       # ---- Method A: Webhook (simplest) ----
       - name: Trigger Amplify via Webhook
-        if: secrets.AMPLIFY_WEBHOOK_URL != ''
+        if: ${{secrets.AMPLIFY_WEBHOOK_URL != ''}}
         run: |
           curl -s -X POST \
-            -H "Content-Type: application/json" \
+            -H "Content-Type: a{{pplication/json" \
             -d '{"trigger":"github-actions"}' \
             "${{ secrets.AMPLIFY_WEBHOOK_URL }}"
 
       # ---- Method B: AWS CLI (triggers & waits) ----
       - name: Trigger Amplify via CLI
-        if: secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''
+        if: ${{secrets.AMPLIFY_APP_ID != '' && secrets.AMPLIFY_BRANCH != ''}}
         id: start
         run: |
           JOB_JSON=$(aws amplify start-job \
