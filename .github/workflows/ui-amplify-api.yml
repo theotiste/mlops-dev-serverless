@@ -1,4 +1,4 @@
-name: Deploy UI (Amplify API)
+name: UI → Amplify
 
 on:
   push:
@@ -6,108 +6,79 @@ on:
     paths:
       - 'ui/**'
       - '.github/workflows/ui-amplify-api.yml'
-  workflow_dispatch: {}
-
-# Annule la run précédente si une nouvelle arrive sur la même ref
-concurrency:
-  group: amplify-ui-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write     # pour OIDC si tu utilises un rôle IAM
+      id-token: write
       contents: read
 
+    # Expose les secrets en variables d'environnement
+    env:
+      # Amplify
+      AMPLIFY_WEBHOOK_URL: ${{ secrets.AMPLIFY_WEBHOOK_URL }}  # si tu utilises le webhook
+      AMPLIFY_APP_ID:      ${{ secrets.AMPLIFY_APP_ID }}        # si tu utilises la CLI en fallback
+      AMPLIFY_BRANCH:      ${{ secrets.AMPLIFY_BRANCH }}
+      AWS_REGION:          ${{ secrets.AWS_REGION }}
+      AWS_ROLE_ARN:        ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+      # Variables pour générer/patcher ui/config.json
+      UI_API_BASE: ${{ secrets.UI_API_BASE }}
+      UI_INDEX:    ${{ secrets.UI_INDEX }}
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Vérif des secrets requis
-        if: ${{ !secrets.AMPLIFY_APP_ID || !secrets.AMPLIFY_BRANCH || !secrets.AWS_REGION }}
+      # (optionnel) Vérif visuelle
+      - name: Debug env
         run: |
-          echo "::error::Il manque au moins un secret requis: AMPLIFY_APP_ID / AMPLIFY_BRANCH / AWS_REGION"
-          exit 1
+          echo "UI_INDEX=$UI_INDEX"
+          if [ -n "$AMPLIFY_WEBHOOK_URL" ]; then echo "Webhook: present"; else echo "Webhook: none"; fi
 
-      # ---------- Option 1 : OIDC (recommandé) ----------
-      - name: Configure AWS creds (OIDC + IAM Role)
-        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # ---------- Option 2 : Access Keys ----------
-      - name: Configure AWS creds (Access Keys)
-        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Installer AWS CLI v2
-        uses: unfor19/install-aws-cli-action@v1
-        with:
-          version: '2'
-
-      # (Facultatif) Met à jour des variables d'env côté branche Amplify
-      - name: Mettre à jour les variables d'env de la branche (optionnel)
-        if: ${{ secrets.UI_API_BASE != '' || secrets.UI_INDEX != '' }}
-        env:
-          APP_ID: ${{ secrets.AMPLIFY_APP_ID }}
-          BRANCH: ${{ secrets.AMPLIFY_BRANCH }}
-          API_BASE: ${{ secrets.UI_API_BASE }}
-          UI_INDEX: ${{ secrets.UI_INDEX }}
+      # Patch / crée ui/config.json à partir des variables
+      - name: Patch ui/config.json
+        working-directory: ui
         run: |
           set -euo pipefail
-          KV=()
-          if [ -n "${API_BASE:-}" ]; then KV+=(API_BASE="$API_BASE"); fi
-          if [ -n "${UI_INDEX:-}" ]; then KV+=(UI_INDEX="$UI_INDEX"); fi
-          if [ ${#KV[@]} -gt 0 ]; then
-            aws amplify update-branch \
-              --app-id "$APP_ID" \
-              --branch-name "$BRANCH" \
-              --environment-variables "${KV[@]}"
+          if command -v jq >/dev/null 2>&1 && [ -f config.json ]; then
+            tmp=$(mktemp)
+            jq --arg api "$UI_API_BASE" --arg index "$UI_INDEX" \
+              '.api_base=$api | .index=$index' config.json > "$tmp"
+            mv "$tmp" config.json
           else
-            echo "Aucune variable à mettre à jour."
+            # Fallback sans jq ou si le fichier n'existe pas
+            cat > config.json <<EOF
+            {
+              "api_base": "${UI_API_BASE}",
+              "index": "${UI_INDEX}"
+            }
+            EOF
           fi
+          echo "config.json:"
+          cat config.json
 
-      - name: Déclencher build/deploy Amplify
-        env:
-          APP_ID: ${{ secrets.AMPLIFY_APP_ID }}
-          BRANCH: ${{ secrets.AMPLIFY_BRANCH }}
-          JOB_TYPE: ${{ secrets.AMPLIFY_JOB_TYPE || 'RELEASE' }}
+      # ---- Méthode A : Webhook (la plus simple) ----
+      - name: Trigger Amplify via Webhook
+        if: ${{ env.AMPLIFY_WEBHOOK_URL != '' }}
         run: |
-          set -euo pipefail
-          echo "Start Amplify job: app=$APP_ID, branch=$BRANCH, type=$JOB_TYPE"
+          curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"trigger":"github-actions"}' \
+            "$AMPLIFY_WEBHOOK_URL"
+
+      # ---- Méthode B : CLI Amplify (fallback si pas de webhook) ----
+      - name: Configure AWS credentials
+        if: ${{ env.AMPLIFY_WEBHOOK_URL == '' && env.AMPLIFY_APP_ID != '' && env.AMPLIFY_BRANCH != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region:     ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+
+      - name: Start Amplify job (RELEASE)
+        if: ${{ env.AMPLIFY_WEBHOOK_URL == '' && env.AMPLIFY_APP_ID != '' && env.AMPLIFY_BRANCH != '' }}
+        run: |
           aws amplify start-job \
-            --app-id "$APP_ID" \
-            --branch-name "$BRANCH" \
-            --job-type "$JOB_TYPE"
-
-      - name: Attendre la fin du job Amplify
-        env:
-          APP_ID: ${{ secrets.AMPLIFY_APP_ID }}
-          BRANCH: ${{ secrets.AMPLIFY_BRANCH }}
-        run: |
-          set -euo pipefail
-          echo "Attente de la fin du job Amplify…"
-          ATTEMPTS=0
-          MAX=60   # 60 * 30s ≈ 30 minutes
-          while :; do
-            STATUS=$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --max-results 1 | jq -r '.jobSummaries[0].status')
-            JOBID=$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --max-results 1 | jq -r '.jobSummaries[0].jobId')
-            echo "Job $JOBID → $STATUS"
-            case "$STATUS" in
-              SUCCEED) exit 0 ;;
-              FAILED|CANCELLED) echo "::error::Amplify job $JOBID terminé avec statut $STATUS"; exit 1 ;;
-            esac
-            ATTEMPTS=$((ATTEMPTS+1))
-            if [ $ATTEMPTS -ge $MAX ]; then
-              echo "::error::Timeout après $(($MAX*30/60)) minutes."
-              exit 1
-            fi
-            sleep 30
-          done
+            --app-id "$AMPLIFY_APP_ID" \
+            --branch-name "$AMPLIFY_BRANCH" \
+            --job-type RELEASE
