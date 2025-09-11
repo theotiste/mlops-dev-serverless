@@ -33,35 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Node requis pour installer les plugins Serverless
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      # Installe le plugin déclaré dans package.json
-      - name: Install Node deps (plugins Serverless)
-        run: npm ci
-
-      # Python requis par serverless-python-requirements
-      - name: Setup Python (same as your Lambda runtime)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      # (si tu utilises OIDC + un rôle IAM)
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: eu-west-3
-
-      # Déploiement
-      - name: Deploy with Serverless
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-        run: npx -y serverless@4 deploy --stage dev --region eu-west-3
+     
 
       # 1) Calcule les "flags" à partir des secrets (PAS d'if avec secrets.*)
       - name: Compute auth flags
