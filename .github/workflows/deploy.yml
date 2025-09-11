@@ -64,7 +64,7 @@ jobs:
 
   frontend:
     name: Trigger Amplify build
-    needs: backend
+    needs: deploy
     runs-on: ubuntu-latest
     permissions:
       id-token: write
