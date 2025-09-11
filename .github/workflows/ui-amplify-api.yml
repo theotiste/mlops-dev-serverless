@@ -1,65 +1,67 @@
-name: UI – Build & Ping Amplify
+name: UI → S3 + Invalidation CF
 
 on:
   push:
     branches: [ main ]
     paths:
-      - "ui/**"
-      - ".github/workflows/ui-amplify-api.yml"
+      - 'ui/**'
+      - '.github/workflows/ui-amplify-api.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'eu-west-3' }}
+  UI_BUCKET:  ${{ secrets.UI_BUCKET }}
+  CF_DISTRIBUTION_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
+  UI_API_BASE: ${{ secrets.UI_API_BASE }}                 # ex: https://api.mlopstheotiste.fr
+  UI_INDEX:    ${{ secrets.UI_INDEX || 'form_validated.html' }}
 
 jobs:
   ui:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Écrit ui/config.json SANS heredoc (aucun ${{ dans le script)
-      - name: Patch ui/config.json
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build ui/config.json
         working-directory: ui
-        env:
-          UI_API_BASE: ${{ secrets.UI_API_BASE || vars.UI_API_BASE }}
-          UI_INDEX:    ${{ secrets.UI_INDEX    || vars.UI_INDEX || 'form_validated.html' }}
         run: |
           set -euo pipefail
-          if command -v jq >/dev/null 2>&1; then
-            jq -n --arg api "$UI_API_BASE" --arg idx "$UI_INDEX" \
-               '{api_base:$api, index:$idx}' > config.json
-          else
-            python3 - <<'PY'
-import json, os, sys
-cfg={"api_base": os.environ.get("UI_API_BASE",""),
-     "index":    os.environ.get("UI_INDEX","")}
-json.dump(cfg, open("config.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)
-PY
-          fi
-          echo "---- ui/config.json ----"
+          python3 - <<'PY'
+          import json, os
+          cfg = {
+              "api_base": os.environ.get("UI_API_BASE", ""),
+              "index":    os.environ.get("UI_INDEX", "form_validated.html"),
+          }
+          with open("config.json", "w", encoding="utf-8") as f:
+              json.dump(cfg, f, ensure_ascii=False, indent=2)
+          PY
+          echo '---- ui/config.json ----'
           cat config.json
 
-      # (Optionnel) sync S3 si tu utilises S3+CF
-      - name: Upload to S3
-        if: ${{ secrets.UI_BUCKET != '' }}
-        env:
-          UI_BUCKET: ${{ secrets.UI_BUCKET }}
+      - name: Sync to S3
         run: |
-          aws s3 sync ui/ "s3://${UI_BUCKET}/public/" --delete --cache-control 'no-cache'
+          set -euo pipefail
+          aws s3 sync ui/ "s3://${UI_BUCKET}/public/" \
+            --delete \
+            --cache-control "no-cache"
 
-      - name: Invalidate CloudFront
-        if: ${{ secrets.CF_DIST_ID != '' }}
-        env:
-          CF_DIST_ID: ${{ secrets.CF_DIST_ID }}
+      - name: Invalidate CloudFront (HTML + config)
+        if: env.CF_DISTRIBUTION_ID != ''
         run: |
           aws cloudfront create-invalidation \
-            --distribution-id "$CF_DIST_ID" \
+            --distribution-id "$CF_DISTRIBUTION_ID" \
             --paths "/config.json" "/form_validated.html" "/result.html"
-
-      # Déclenche Amplify via Webhook (méthode la plus simple)
-      - name: Trigger Amplify via Webhook
-        if: ${{ secrets.AMPLIFY_WEBHOOK_URL != '' }}
-        run: |
-          curl -s -X POST -H "Content-Type: application/json" \
-               -d '{"trigger":"github-actions"}' \
-               "${{ secrets.AMPLIFY_WEBHOOK_URL }}"
