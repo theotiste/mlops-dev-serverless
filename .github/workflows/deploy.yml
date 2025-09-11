@@ -63,28 +63,6 @@ jobs:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
         run: npx -y serverless@4 deploy --stage dev --region eu-west-3
 
-
-jobs:
-  backend:
-    name: Deploy Serverless backend
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Deploy with Serverless
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
-          SLS_ORG: sorbonne
-          SLS_APP: cancer-prediction-api
-        run: |
-          npx -y serverless@4 deploy --stage dev --region eu-west-3 \
-          ${SLS_ORG:+--org "$SLS_ORG"} ${SLS_APP:+--app "$SLS_APP"}
-
-
       # 1) Calcule les "flags" à partir des secrets (PAS d'if avec secrets.*)
       - name: Compute auth flags
         id: flags
