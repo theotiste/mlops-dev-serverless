@@ -5,22 +5,28 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
-  # Exécute les tests quand vos pipelines de déploiement sont terminés avec succès
   workflow_run:
     workflows:
-#      - "Deploy"                       # <- remplacez si le nom diffère
-      - "UI → S3 + Invalidation CF"    # <- remplacez si le nom diffère
-    types: [completed]
+      - "UI → S3 + Invalidation CF"     # <-- DOIT matcher exactement le name: du workflow UI
+#      - "Deploy API (Serverless)"       # <-- ajoute-le si tu veux déclencher après le déploiement API
+    branches: [ main ]                  # évite les runs hors main
+    types: [ completed ]
 
 concurrency:
-  group: smoke-tests-${{ github.ref }}
+  # Avec workflow_run, github.ref peut être vide → fallback sur head_branch, puis ref, puis run_id
+  group: smoke-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   smoke:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # On exécute si :
+    #  - ce n'est PAS un workflow_run (push / dispatch) OU
+    #  - c'est un workflow_run et la conclusion est 'success'
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     env:
       API_BASE: ${{ vars.API_BASE || secrets.API_BASE }}
       UI_BASE:  ${{ vars.UI_BASE  || secrets.UI_BASE  }}
@@ -36,7 +42,7 @@ jobs:
           echo "API_BASE=${API_BASE}"
           echo "UI_BASE=${UI_BASE}"
 
-      - name: Install tools
+      - name: Install tools (jq)
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -57,8 +63,6 @@ jobs:
       - name: Build smoke payload (30 floats)
         run: |
           set -euo pipefail
-          # Un échantillon neutre : l’objectif est d’obtenir une 200 + un JSON structuré,
-          # pas de valider la classe exacte.
           cat > /tmp/payload.json <<'JSON'
           {
             "features": [
@@ -78,14 +82,8 @@ jobs:
           code=$(curl -fsS -m 30 -H "Content-Type: application/json" -d @/tmp/payload.json -w "%{http_code}" -o /tmp/predict.json "$URL" || true)
           test "$code" = "200" || { echo "HTTP $code on /predict"; cat /tmp/predict.json || true; exit 1; }
           cat /tmp/predict.json
-
-          # Valide la structure: predictions présent et non vide
           jq -e '.predictions | type=="array" and (length>=1)' /tmp/predict.json >/dev/null
-
-          # Probabilités (si présentes): tableau de tableaux [[p0,p1]]
           jq -e '(.probabilities == null) or ((.probabilities|type=="array") and (.probabilities|length>=1) and (.probabilities[0]|length>=1))' /tmp/predict.json >/dev/null
-
-          # Si proba au format [[p0,p1]] => vérifier range 0..1
           if jq -e '.probabilities != null' /tmp/predict.json >/dev/null; then
             jq -e '[.probabilities[][]] | all(. >= 0 and . <= 1)' /tmp/predict.json >/dev/null
           fi
@@ -96,9 +94,8 @@ jobs:
           set -euo pipefail
           HTML="${UI_BASE%/}/form_validated.html"
           echo "HEAD ${HTML}"
-          # On retry un peu si CloudFront vient d’être invalidé
           for i in {1..5}; do
-            code=$(curl -fsS -m 20 -o /dev/null -w "%{http_code}" -I "$HTML" || true)
+            code=$(curl -fsS -m 20 -o /null -w "%{http_code}" -I "$HTML" || true)
             if [ "$code" = "200" ]; then
               echo "OK 200"
               break
@@ -120,7 +117,9 @@ jobs:
       # ---------- Résumé job ----------
       - name: Summary
         run: |
-          echo "✅ Smoke tests passed" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- API: ${API_BASE}" >> $GITHUB_STEP_SUMMARY
-          echo "- UI : ${UI_BASE}"  >> $GITHUB_STEP_SUMMARY
+          {
+            echo "✅ Smoke tests passed"
+            echo
+            echo "- API: ${API_BASE}"
+            echo "- UI : ${UI_BASE}"
+          } >> "$GITHUB_STEP_SUMMARY"
