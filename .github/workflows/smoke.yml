@@ -54,40 +54,59 @@ jobs:
           set -euo pipefail
           URL="${API_BASE%/}${API_HEALTH_PATH}"
           echo "GET ${URL}"
-          code=$(curl -fsS -m 20 -w "%{http_code}" -o /tmp/health.json "$URL" || true)
-          test "$code" = "200" || { echo "HTTP $code on /health"; cat /tmp/health.json || true; exit 1; }
-          cat /tmp/health.json
-          jq -e '.ok == true' /tmp/health.json >/dev/null || { echo "Health JSON invalid (missing ok:true)"; exit 1; }
 
-      # ---------- API: /predict ----------
-      - name: Build smoke payload (30 floats)
-        run: |
-          set -euo pipefail
-          cat > /tmp/payload.json <<'JSON'
-          {
-            "features": [
-              14.5, 20.1, 95.5, 700.0, 0.10, 0.11, 0.08, 0.05, 0.18, 0.060,
-              0.50, 1.10, 3.50, 40.0, 0.006, 0.020, 0.025, 0.010, 0.020, 0.003,
-              16.5, 22.1, 110.0, 900.0, 0.13, 0.18, 0.20, 0.12, 0.28, 0.080
-            ]
-          }
-          JSON
-          jq . /tmp/payload.json
+          UA="Mozilla/5.0 (compatible; GitHubActionsSmoke/1.0; +https://github.com/${GITHUB_REPOSITORY})"
+
+          # pas de -f ; on garde le body même si 403, et on dump les headers
+          code=$(curl -sS -m 20 \
+                   -H "User-Agent: ${UA}" \
+                   -D /tmp/health.hdr \
+                   -o /tmp/health.json \
+                   -w "%{http_code}" \
+                   "$URL" \
+                 || true)
+
+          echo "HTTP $code"
+          echo "----- response headers -----"
+          sed -n '1,40p' /tmp/health.hdr || true
+          echo "----- response body -----"
+          cat /tmp/health.json || true
+
+          test "$code" = "200" || { echo "HTTP $code on /health"; exit 1; }
+          jq -e '.ok == true' /tmp/health.json >/dev/null || { echo "Health JSON invalid (missing ok:true)"; exit 1; }
 
       - name: API predict check
         run: |
           set -euo pipefail
           URL="${API_BASE%/}${API_PREDICT_PATH}"
           echo "POST ${URL}"
-          code=$(curl -fsS -m 30 -H "Content-Type: application/json" -d @/tmp/payload.json -w "%{http_code}" -o /tmp/predict.json "$URL" || true)
-          test "$code" = "200" || { echo "HTTP $code on /predict"; cat /tmp/predict.json || true; exit 1; }
-          cat /tmp/predict.json
+
+          UA="Mozilla/5.0 (compatible; GitHubActionsSmoke/1.0; +https://github.com/${GITHUB_REPOSITORY})"
+
+          code=$(curl -sS -m 30 \
+                   -H "Content-Type: application/json" \
+                   -H "User-Agent: ${UA}" \
+                   -D /tmp/predict.hdr \
+                   -o /tmp/predict.json \
+                   -w "%{http_code}" \
+                   --data @/tmp/payload.json \
+                   "$URL" \
+                 || true)
+
+          echo "HTTP $code"
+          echo "----- response headers -----"
+          sed -n '1,60p' /tmp/predict.hdr || true
+          echo "----- response body -----"
+          cat /tmp/predict.json || true
+
+          test "$code" = "200" || { echo "HTTP $code on /predict"; exit 1; }
           jq -e '.predictions | type=="array" and (length>=1)' /tmp/predict.json >/dev/null
           jq -e '(.probabilities == null) or ((.probabilities|type=="array") and (.probabilities|length>=1) and (.probabilities[0]|length>=1))' /tmp/predict.json >/dev/null
           if jq -e '.probabilities != null' /tmp/predict.json >/dev/null; then
             jq -e '[.probabilities[][]] | all(. >= 0 and . <= 1)' /tmp/predict.json >/dev/null
           fi
 
+    
       # ---------- UI: disponibilité ----------
       - name: UI index check (HTML page reachable)
         run: |
