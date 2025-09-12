@@ -3,6 +3,8 @@ name: Smoke tests (UI + API)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
   # Exécute les tests quand vos pipelines de déploiement sont terminés avec succès
   workflow_run:
     workflows:
