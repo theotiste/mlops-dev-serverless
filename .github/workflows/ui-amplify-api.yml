@@ -1,4 +1,4 @@
-name: UI → S3 + Invalidation CF
+nname: UI → S3 + Invalidation CF
 
 on:
   push:
