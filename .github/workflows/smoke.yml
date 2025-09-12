@@ -6,7 +6,7 @@ on:
   # Exécute les tests quand vos pipelines de déploiement sont terminés avec succès
   workflow_run:
     workflows:
-      - "Deploy"                       # <- remplacez si le nom diffère
+#      - "Deploy"                       # <- remplacez si le nom diffère
       - "UI → S3 + Invalidation CF"    # <- remplacez si le nom diffère
     types: [completed]
 
