@@ -1,67 +1,117 @@
 name: UI → S3 + Invalidation CF
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
-      - 'ui/**'
-      - '.github/workflows/ui-amplify-api.yml'
-  workflow_dispatch:
+      - "ui/**"
+      - ".github/workflows/ui-amplify-api.yml"
+
+concurrency:
+  group: ui-deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
-  id-token: write
+  id-token: write     # OIDC → STS AssumeRole
   contents: read
 
 env:
-  AWS_REGION: ${{ secrets.AWS_REGION || 'eu-west-3' }}
-  UI_BUCKET:  ${{ secrets.UI_BUCKET }}
-  CF_DISTRIBUTION_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
-  UI_API_BASE: ${{ secrets.UI_API_BASE }}                 # ex: https://api.mlopstheotiste.fr
-  UI_INDEX:    ${{ secrets.UI_INDEX || 'form_validated.html' }}
+  AWS_REGION:   ${{ vars.AWS_REGION   || secrets.AWS_REGION   || 'eu-west-3' }}
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+  S3_BUCKET:    ${{ vars.S3_BUCKET    || secrets.S3_BUCKET }}
+  CF_DIST_ID:   ${{ vars.CF_DIST_ID   || secrets.CF_DIST_ID }}
+  UI_DIR:       ${{ vars.UI_DIR       || 'ui' }}
+  UI_INDEX:     ${{ vars.UI_INDEX     || 'form_validated.html' }}
+  API_BASE:     ${{ vars.API_BASE     || secrets.API_BASE }}
+  API_STAGE:    ${{ vars.API_STAGE    || secrets.API_STAGE || '' }}
+  UA: "gh-ui-deploy/${{ github.repository }}@${{ github.sha }}"
 
 jobs:
   ui:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check required inputs
+        run: |
+          set -euo pipefail
+          for v in AWS_ROLE_ARN S3_BUCKET CF_DIST_ID AWS_REGION UI_DIR UI_INDEX API_BASE; do
+            test -n "${!v:-}" || { echo "::error::Missing $v"; exit 1; }
+          done
+          echo "Inputs OK"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Build ui/config.json
-        working-directory: ui
+      - name: Resolve API base (append stage if missing)
         run: |
           set -euo pipefail
+          base="${API_BASE%/}"
+          stage="${API_STAGE:-}"
+          if [ -n "$stage" ] && ! printf "%s\n" "$base" | grep -qE "/${stage}(/)?$"; then
+            base="${base}/${stage}"
+          fi
+          echo "API_BASE_EFF=$base" >> "$GITHUB_ENV"
+          echo "Using API_BASE_EFF=$base"
+
+      - name: Prepare config.json (UI)
+        working-directory: ${{ env.UI_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p .
           python3 - <<'PY'
           import json, os
           cfg = {
-              "api_base": os.environ.get("UI_API_BASE", ""),
-              "index":    os.environ.get("UI_INDEX", "form_validated.html"),
+            "api_base": os.environ["API_BASE_EFF"],
+            "index":    os.environ.get("UI_INDEX","form_validated.html")
           }
-          with open("config.json", "w", encoding="utf-8") as f:
+          with open("config.json","w",encoding="utf-8") as f:
               json.dump(cfg, f, ensure_ascii=False, indent=2)
+          print("config.json =>", cfg)
           PY
-          echo '---- ui/config.json ----'
+          echo
+          echo "---- config.json ----"
           cat config.json
 
-      - name: Sync to S3
+      - name: Upload assets (long cache)
         run: |
           set -euo pipefail
-          aws s3 sync ui/ "s3://${UI_BUCKET}/public/" \
+          aws s3 sync "${UI_DIR}/" "s3://${S3_BUCKET}/" \
+            --only-show-errors \
             --delete \
-            --cache-control "no-cache"
+            --exclude "*.html" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --metadata-directive REPLACE
 
-      - name: Invalidate CloudFront (HTML + config)
-        if: env.CF_DISTRIBUTION_ID != ''
+      - name: Upload HTML (no-store)
         run: |
+          set -euo pipefail
+          aws s3 sync "${UI_DIR}/" "s3://${S3_BUCKET}/" \
+            --only-show-errors \
+            --delete \
+            --exclude "*" --include "*.html" --include "config.json" \
+            --cache-control "no-store, must-revalidate" \
+            --metadata-directive REPLACE
+
+      - name: Invalidate CloudFront
+        run: |
+          set -euo pipefail
           aws cloudfront create-invalidation \
-            --distribution-id "$CF_DISTRIBUTION_ID" \
-            --paths "/config.json" "/form_validated.html" "/result.html"
+            --distribution-id "${CF_DIST_ID}" \
+            --paths "/*" \
+            --query 'Invalidation.Id' --output text
+
+      - name: Summary
+        run: |
+          echo "✅ UI déployée sur S3 et CF invalidé." >> $GITHUB_STEP_SUMMARY
+          echo "- Bucket : ${S3_BUCKET}" >> $GITHUB_STEP_SUMMARY
+          echo "- CF ID  : ${CF_DIST_ID}" >> $GITHUB_STEP_SUMMARY
+          echo "- API base utilisée : ${API_BASE_EFF}" >> $GITHUB_STEP_SUMMARY
+          echo "- UI index : ${UI_INDEX}" >> $GITHUB_STEP_SUMMARY
