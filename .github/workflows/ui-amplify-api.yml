@@ -18,9 +18,9 @@ permissions:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'eu-west-3' }}
-  S3_BUCKET:  ${{ vars.UI_S3_BUCKET || secrets.UI_S3_BUCKET }}
-  CF_DIST_ID: ${{ vars.CF_DISTRIBUTION_ID || secrets.CF_DISTRIBUTION_ID }}
-  UI_API_BASE: ${{ vars.UI_API_BASE || secrets.UI_API_BASE }}   # ex: https://xxxxx.execute-api.eu-west-3.amazonaws.com/dev
+  S3_BUCKET:  ${{ vars.UI_BUCKET || secrets.UI_BUCKET }}
+  CF_DIST_ID: ${{ vars.CF_DIST_ID || secrets.CF_DIST_ID }}
+  UI_API_BASE: ${{ vars.API_BASE || secrets.API_BASE }}   # ex: https://xxxxx.execute-api.eu-west-3.amazonaws.com/dev
   UI_INDEX:    ${{ vars.UI_INDEX || 'form_validated.html' }}
 
 jobs:
