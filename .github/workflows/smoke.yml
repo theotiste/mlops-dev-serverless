@@ -6,10 +6,9 @@ on:
   push:
     branches: [ main ]
   workflow_run:
-    # Déclenché quand vos jobs de déploiement finissent avec succès.
     workflows:
-#      - "Deploy API (Serverless)"        # adaptez au nom exact si différent
-      - "UI → S3 + Invalidation CF"      # adaptez au nom exact si différent
+      # - "Deploy API (Serverless)"         # adaptez si vous le reliez au déploiement API
+      - "UI → S3 + Invalidation CF"        # nom exact du workflow UI
     types: [completed]
 
 concurrency:
@@ -17,12 +16,11 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  id-token: write     # nécessaire pour OIDC → STS:AssumeRole
+  id-token: write         # OIDC -> STS:AssumeRole (nécessaire si SigV4)
   contents: read
 
 jobs:
   smoke:
-    # Exécute si déclenché manuellement, par push, ou si les workflows ci-dessus ont réussi
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
@@ -31,125 +29,119 @@ jobs:
     timeout-minutes: 15
 
     env:
-      # Entrées (vars > secrets)
-      API_BASE:       ${{ vars.API_BASE       || secrets.API_BASE       }}
-      UI_BASE:        ${{ vars.UI_BASE        || secrets.UI_BASE        }}
-      AWS_REGION:     ${{ vars.AWS_REGION     || secrets.AWS_REGION     || 'eu-west-3' }}
-      API_SMOKE_KEY:  ${{ secrets.API_SMOKE_KEY || '' }}
-      # Chemins API
+      API_BASE:        ${{ vars.API_BASE        || secrets.API_BASE        }}
+      UI_BASE:         ${{ vars.UI_BASE         || secrets.UI_BASE         }}
+      AWS_REGION:      ${{ vars.AWS_REGION      || secrets.AWS_REGION      || 'eu-west-3' }}
+      AWS_ROLE_ARN:    ${{ vars.AWS_ROLE_ARN    || secrets.AWS_ROLE_ARN    || '' }}
+      API_SMOKE_KEY:   ${{ secrets.API_SMOKE_KEY || '' }}
+
       API_HEALTH_PATH:  /health
       API_PREDICT_PATH: /predict
-      # UA pour éviter certains filtres anti-bots
-      UA: "gh-smoke/${{ github.repository }}@${{ github.sha }}"
+      UA:              "gh-smoke/${{ github.repository }}@${{ github.sha }}"
+      USE_SIGV4:       ${{ vars.USE_SIGV4 || 'false' }}
 
     steps:
-    # OIDC: nécessaire pour signer les requêtes execute-api
-      - name: Configure AWS credentials (OIDC)
-        if: env.API_AUTH_MODE == 'aws'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
-          aws-region:     ${{ env.AWS_REGION }}
-
-      - name: Who am I?
-        if: env.API_AUTH_MODE == 'aws'
-        run: aws sts get-caller-identity 
-      - name: Check required inputs
+      - name: Decide mode
         run: |
           set -euo pipefail
-          test -n "${API_BASE:-}" || { echo "::error::Missing API_BASE (vars or secrets)"; exit 1; }
-          test -n "${UI_BASE:-}"  || { echo "::error::Missing UI_BASE  (vars or secrets)"; exit 1; }
-          test -n "${AWS_REGION:-}" || { echo "::error::Missing AWS_REGION"; exit 1; }
-          test -n "${{ secrets.AWS_ROLE_ARN }}" || { echo "::error::Missing secret AWS_ROLE_ARN"; exit 1; }
+          MODE=$([[ "${USE_SIGV4}" == "true" ]] && echo sigv4 || echo anonymous)
+          echo "MODE=${MODE}" | tee -a $GITHUB_ENV
+
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          test -n "${API_BASE:-}" || { echo "::error::Missing API_BASE"; exit 1; }
+          test -n "${UI_BASE:-}"  || { echo "::error::Missing UI_BASE"; exit 1; }
           echo "API_BASE=${API_BASE}"
           echo "UI_BASE=${UI_BASE}"
           echo "AWS_REGION=${AWS_REGION}"
+          echo "MODE=${MODE}"
+          if [ "${MODE}" = "sigv4" ]; then
+            test -n "${AWS_ROLE_ARN:-}" || { echo "::error::Missing AWS_ROLE_ARN (required when USE_SIGV4=true)"; exit 1; }
+          fi
 
-      - name: Configure AWS credentials (OIDC / SigV4)
+      - name: Configure AWS credentials (OIDC / SigV4 only)
+        if: env.MODE == 'sigv4'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
 
-      - name: Install tools (jq + Python deps)
+      - name: Who am I? (debug)
+        if: env.MODE == 'sigv4'
+        run: aws sts get-caller-identity
+
+      - name: Install tools
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq python3-pip
           python3 -m pip install --upgrade pip
-          # Signatures SigV4 + HTTP
-          python3 -m pip install requests requests-aws4auth
+          python3 -m pip install requests requests-aws4auth boto3
 
-      # -------------------- API /health (IAM sign) --------------------
-      - name: API health check (SigV4)
-        id: api_health
+      # ----------- API /health -----------
+      - name: API health check
         run: |
           set -euo pipefail
-          PY_SCRIPT="$(mktemp)"
-          cat > "$PY_SCRIPT" <<'PY'
+          PY=$(mktemp)
+          cat > "$PY" <<'PY'
           import os, sys, time, json
           import requests
-          import boto3
           from requests_aws4auth import AWS4Auth
+          import boto3
 
           api_base   = os.environ["API_BASE"].rstrip("/")
-          health     = os.environ.get("API_HEALTH_PATH","/health")
+          path       = os.environ.get("API_HEALTH_PATH","/health")
           region     = os.environ["AWS_REGION"]
+          use_sigv4  = os.environ.get("USE_SIGV4","false").lower() == "true"
           api_key    = os.environ.get("API_SMOKE_KEY","")
           ua         = os.environ.get("UA","gh-smoke")
 
-          url = f"{api_base}{health}"
-          sess = boto3.Session()
-          creds = sess.get_credentials().get_frozen_credentials()
-          auth  = AWS4Auth(creds.access_key, creds.secret_key, region, 'execute-api', session_token=creds.token)
+          url  = f"{api_base}{path}"
+          auth = None
+          if use_sigv4:
+            sess = boto3.Session()
+            creds = sess.get_credentials().get_frozen_credentials()
+            auth  = AWS4Auth(creds.access_key, creds.secret_key, region, 'execute-api', session_token=creds.token)
 
           headers = {"User-Agent": ua}
           if api_key:
-              headers["x-api-key"] = api_key
+            headers["x-api-key"] = api_key
 
           last = None
-          for attempt in range(1, 6):
-              try:
-                  r = requests.get(url, auth=auth, headers=headers, timeout=20)
-                  last = r
-                  # log brut pour debug
-                  sys.stdout.write("----- response headers -----\n")
-                  for k,v in r.headers.items(): sys.stdout.write(f"{k}: {v}\n")
-                  sys.stdout.write("\n----- response body -----\n")
-                  sys.stdout.write(r.text + "\n")
-                  if r.status_code < 500:
-                      break
-              except Exception as e:
-                  sys.stderr.write(f"[attempt {attempt}] error: {e}\n")
-              time.sleep(2 * attempt)
+          for attempt in range(1,6):
+            try:
+              r = requests.get(url, headers=headers, auth=auth, timeout=20)
+              last = r
+              print("----- response headers -----")
+              for k,v in r.headers.items(): print(f"{k}: {v}")
+              print("\n----- response body -----")
+              print(r.text)
+              if r.status_code < 500:
+                break
+            except Exception as e:
+              print(f"[attempt {attempt}] {e}", file=sys.stderr)
+            time.sleep(2*attempt)
 
           if last is None:
-              print("No response", file=sys.stderr)
-              sys.exit(1)
-
+            print("No response", file=sys.stderr); sys.exit(1)
           if last.status_code != 200:
-              print(f"HTTP {last.status_code} on /health", file=sys.stderr)
-              sys.exit(1)
+            print(f"HTTP {last.status_code} on /health", file=sys.stderr); sys.exit(1)
 
-          # Valide le JSON si présent
           try:
-              data = last.json()
-              # ok:true si votre /health le renvoie (sinon on tolère)
-              if "ok" in data and data["ok"] is not True:
-                  print("Health JSON invalid (ok != true)", file=sys.stderr)
-                  sys.exit(1)
-              with open("/tmp/health.json","w",encoding="utf-8") as f:
-                  json.dump(data,f,ensure_ascii=False,indent=2)
+            data = last.json()
+            if "ok" in data and data["ok"] is not True:
+              print("Health JSON invalid (ok!=true)", file=sys.stderr); sys.exit(1)
+            with open("/tmp/health.json","w",encoding="utf-8") as f:
+              json.dump(data,f,ensure_ascii=False,indent=2)
           except Exception:
-              # pas de JSON → toléré si 200
-              pass
+            pass
           PY
-          python3 "$PY_SCRIPT"
+          python3 "$PY"
 
-      # -------------------- API /predict (IAM sign) --------------------
+      # ----------- API /predict -----------
       - name: Build smoke payload (30 floats)
         run: |
-          set -euo pipefail
           cat > /tmp/payload.json <<'JSON'
           {
             "features": [
@@ -161,95 +153,86 @@ jobs:
           JSON
           jq . /tmp/payload.json
 
-      - name: API predict check (SigV4)
-        id: api_predict
+      - name: API predict check
         run: |
           set -euo pipefail
-          PY_SCRIPT="$(mktemp)"
-          cat > "$PY_SCRIPT" <<'PY'
+          PY=$(mktemp)
+          cat > "$PY" <<'PY'
           import os, sys, time, json
           import requests
-          import boto3
           from requests_aws4auth import AWS4Auth
+          import boto3
 
           api_base   = os.environ["API_BASE"].rstrip("/")
           path       = os.environ.get("API_PREDICT_PATH","/predict")
           region     = os.environ["AWS_REGION"]
+          use_sigv4  = os.environ.get("USE_SIGV4","false").lower() == "true"
           api_key    = os.environ.get("API_SMOKE_KEY","")
           ua         = os.environ.get("UA","gh-smoke")
 
-          url = f"{api_base}{path}"
+          url  = f"{api_base}{path}"
           with open("/tmp/payload.json","r",encoding="utf-8") as f:
-              payload = json.load(f)
+            payload = json.load(f)
 
-          sess = boto3.Session()
-          creds = sess.get_credentials().get_frozen_credentials()
-          auth  = AWS4Auth(creds.access_key, creds.secret_key, region, 'execute-api', session_token=creds.token)
+          auth = None
+          if use_sigv4:
+            sess = boto3.Session()
+            creds = sess.get_credentials().get_frozen_credentials()
+            auth  = AWS4Auth(creds.access_key, creds.secret_key, region, 'execute-api', session_token=creds.token)
 
           headers = {"User-Agent": ua, "Content-Type":"application/json"}
           if api_key:
-              headers["x-api-key"] = api_key
+            headers["x-api-key"] = api_key
 
           last = None
-          for attempt in range(1, 6):
-              try:
-                  r = requests.post(url, json=payload, auth=auth, headers=headers, timeout=30)
-                  last = r
-                  # log brut
-                  sys.stdout.write("----- response headers -----\n")
-                  for k,v in r.headers.items(): sys.stdout.write(f"{k}: {v}\n")
-                  sys.stdout.write("\n----- response body -----\n")
-                  sys.stdout.write(r.text + "\n")
-                  if r.status_code < 500:
-                      break
-              except Exception as e:
-                  sys.stderr.write(f"[attempt {attempt}] error: {e}\n")
-              time.sleep(2 * attempt)
+          for attempt in range(1,6):
+            try:
+              r = requests.post(url, json=payload, headers=headers, auth=auth, timeout=30)
+              last = r
+              print("----- response headers -----")
+              for k,v in r.headers.items(): print(f"{k}: {v}")
+              print("\n----- response body -----")
+              print(r.text)
+              if r.status_code < 500:
+                break
+            except Exception as e:
+              print(f"[attempt {attempt}] {e}", file=sys.stderr)
+            time.sleep(2*attempt)
 
           if last is None:
-              print("No response", file=sys.stderr)
-              sys.exit(1)
-
+            print("No response", file=sys.stderr); sys.exit(1)
           if last.status_code != 200:
-              print(f"HTTP {last.status_code} on /predict", file=sys.stderr)
-              sys.exit(1)
+            print(f"HTTP {last.status_code} on /predict", file=sys.stderr); sys.exit(1)
 
-          # Valide structure JSON
           try:
-              data = last.json()
+            data = last.json()
           except Exception:
-              print("Predict response is not JSON", file=sys.stderr)
-              sys.exit(1)
+            print("Predict response is not JSON", file=sys.stderr); sys.exit(1)
 
-          # predictions: array non vide
           if ("predictions" not in data) or (not isinstance(data["predictions"], list)) or (len(data["predictions"]) < 1):
-              print("Missing/invalid 'predictions'", file=sys.stderr); sys.exit(1)
+            print("Missing/invalid 'predictions'", file=sys.stderr); sys.exit(1)
 
-          # probabilities (si présent) : valeurs 0..1
           probs = data.get("probabilities")
           if probs is not None:
-              ok = True
-              try:
-                  flat = []
-                  for row in probs:
-                      if isinstance(row, list):
-                          flat += row
-                      else:
-                          flat.append(row)
-                  ok = all(0.0 <= float(x) <= 1.0 for x in flat)
-              except Exception:
-                  ok = False
-              if not ok:
-                  print("Invalid 'probabilities' values (expected 0..1)", file=sys.stderr); sys.exit(1)
+            flat=[]
+            try:
+              for row in probs:
+                if isinstance(row, list): flat+=row
+                else: flat.append(row)
+              ok = all(0.0 <= float(x) <= 1.0 for x in flat)
+            except Exception:
+              ok = False
+            if not ok:
+              print("Invalid 'probabilities' values (expected 0..1)", file=sys.stderr); sys.exit(1)
 
           with open("/tmp/predict.json","w",encoding="utf-8") as f:
-              json.dump(data,f,ensure_ascii=False,indent=2)
+            json.dump(data,f,ensure_ascii=False,indent=2)
           PY
-          python3 "$PY_SCRIPT"
+          python3 "$PY"
           echo "---- predict.json ----"
           cat /tmp/predict.json
 
-      # -------------------- UI checks --------------------
+      # ----------- UI -----------
       - name: UI index check (HEAD with retry)
         run: |
           set -euo pipefail
@@ -271,10 +254,12 @@ jobs:
           cat /tmp/config.json
           jq -e '.api_base and .index' /tmp/config.json >/dev/null
 
-      # -------------------- Summary --------------------
       - name: Summary
         run: |
-          echo "✅ Smoke tests passed" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- API base: ${API_BASE}" >> $GITHUB_STEP_SUMMARY
-          echo "- UI  base: ${UI_BASE}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "✅ Smoke tests passed"
+            echo
+            echo "- Mode     : ${MODE}"
+            echo "- API base : ${API_BASE}"
+            echo "- UI  base : ${UI_BASE}"
+          } >> $GITHUB_STEP_SUMMARY
