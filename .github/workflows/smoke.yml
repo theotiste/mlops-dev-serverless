@@ -43,6 +43,17 @@ jobs:
       UA: "gh-smoke/${{ github.repository }}@${{ github.sha }}"
 
     steps:
+    # OIDC: nécessaire pour signer les requêtes execute-api
+      - name: Configure AWS credentials (OIDC)
+        if: env.API_AUTH_MODE == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Who am I?
+        if: env.API_AUTH_MODE == 'aws'
+        run: aws sts get-caller-identity 
       - name: Check required inputs
         run: |
           set -euo pipefail
