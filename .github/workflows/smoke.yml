@@ -6,7 +6,8 @@ on:
   push:
     branches: [ main ]
   workflow_run:
-    workflows: ["UI → S3 + Invalidation CF"]
+    workflows:
+      - "UI → S3 + Invalidation CF"
     types: [completed]
 
 concurrency:
@@ -17,67 +18,104 @@ permissions:
   id-token: write
   contents: read
 
-env:
-  AWS_REGION:   ${{ vars.AWS_REGION   || secrets.AWS_REGION   || 'eu-west-3' }}
-  API_BASE:     ${{ vars.API_BASE     || secrets.API_BASE     }}
-  UI_BASE:      ${{ vars.UI_BASE      || secrets.UI_BASE      }}
-  API_HEALTH_PATH:  /health
-  API_PREDICT_PATH: /predict
-  USE_SIGV4:    ${{ vars.USE_SIGV4 || 'true' }}
-  UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-
 jobs:
   smoke:
-    if: |
+    if: >
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+
+    env:
+      API_BASE:     ${{ vars.API_BASE     || secrets.API_BASE     }}
+      UI_BASE:      ${{ vars.UI_BASE      || secrets.UI_BASE      }}
+      AWS_REGION:   ${{ vars.AWS_REGION   || secrets.AWS_REGION   || 'eu-west-3' }}
+      API_SMOKE_KEY: ${{ secrets.API_SMOKE_KEY || '' }}
+      API_HEALTH_PATH:  /health
+      API_PREDICT_PATH: /predict
+      # UA “navigateur” pour éviter WAF/anti-bot
+      UA_BROWSER: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+      # Fallback SigV4 pour /health si nécessaire
+      HEALTH_SIGV4: ${{ vars.HEALTH_SIGV4 || 'false' }}
 
     steps:
       - name: Check required inputs
         run: |
           set -euo pipefail
-          test -n "${API_BASE:-}" || { echo "::error::Missing API_BASE (secret/var)"; exit 1; }
-          test -n "${UI_BASE:-}"  || { echo "::error::Missing UI_BASE  (secret/var)"; exit 1; }
+          test -n "${API_BASE:-}"    || { echo "::error::Missing API_BASE"; exit 1; }
+          test -n "${UI_BASE:-}"     || { echo "::error::Missing UI_BASE";  exit 1; }
+          test -n "${AWS_REGION:-}"  || { echo "::error::Missing AWS_REGION"; exit 1; }
+          test -n "${{ secrets.AWS_ROLE_ARN }}" || { echo "::error::Missing secret AWS_ROLE_ARN"; exit 1; }
           echo "API_BASE=${API_BASE}"
           echo "UI_BASE=${UI_BASE}"
           echo "AWS_REGION=${AWS_REGION}"
 
-      - name: Configure AWS credentials (OIDC) for SigV4
-        if: env.USE_SIGV4 == 'true'
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region:     ${{ env.AWS_REGION }}
 
-      - name: Install tools
+        # Outils + lib SigV4 Python
+      - name: Install tools (jq + Python deps)
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq python3-pip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install requests requests-aws4auth boto3
 
-      # ---------------- API ----------------
+      # ---------- API /health : anonyme via CloudFront, fallback SigV4 (optionnel) ----------
       - name: API /health (try anonymous then SigV4)
         run: |
           set -euo pipefail
           URL="${API_BASE%/}${API_HEALTH_PATH}"
           echo "GET $URL"
-          code=$(curl -sS -m 25 -A "$UA" -w "%{http_code}" -o /tmp/health.json "$URL" || true)
-          if [ "$code" != "200" ] && [ "${USE_SIGV4}" = "true" ]; then
-            echo "Anonymous failed ($code) → retry with SigV4"
-            code=$(curl -sS -m 25 -A "$UA" -w "%{http_code}" -o /tmp/health.json \
-                   --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" "$URL" || true)
-          fi
-          test "$code" = "200" || { echo "::error::HTTP $code on /health"; cat /tmp/health.json || true; exit 1; }
-          cat /tmp/health.json
-          # Si JSON, valider (tolère non-JSON)
-          jq -e . /tmp/health.json >/dev/null 2>&1 || true
+          code=$(curl -sS -m 20 -A "${UA_BROWSER}" -w "%{http_code}" -o /tmp/health.out "$URL" || true)
+          echo "HTTP $code on /health"
+          cat /tmp/health.out || true
 
+          if [ "$code" = "200" ]; then
+            echo "OK /health (anonymous)"
+            exit 0
+          fi
+
+          if [ "${HEALTH_SIGV4}" = "true" ]; then
+            echo "Anonymous failed ($code) → retry with SigV4"
+            python3 - <<'PY'
+import os,sys,requests,boto3
+from requests_aws4auth import AWS4Auth
+
+api_base=os.environ["API_BASE"].rstrip("/")
+url=f"{api_base}{os.environ.get('API_HEALTH_PATH','/health')}"
+region=os.environ["AWS_REGION"]
+ua=os.environ.get("UA_BROWSER","gh-smoke")
+api_key=os.environ.get("API_SMOKE_KEY","")
+
+sess=boto3.Session()
+creds=sess.get_credentials().get_frozen_credentials()
+auth=AWS4Auth(creds.access_key,creds.secret_key,region,'execute-api',session_token=creds.token)
+
+h={"User-Agent":ua}
+if api_key: h["x-api-key"]=api_key
+
+r=requests.get(url,auth=auth,headers=h,timeout=20)
+print("----- response headers -----")
+for k,v in r.headers.items(): print(f"{k}: {v}")
+print("\n----- response body -----")
+print(r.text)
+
+if r.status_code!=200:
+    print(f"HTTP {r.status_code} on /health",file=sys.stderr); sys.exit(1)
+PY
+          else
+            echo "::error::HTTP $code on /health"; exit 1
+          fi
+
+      # ---------- payload de test ----------
       - name: Build smoke payload (30 floats)
         run: |
-          set -euo pipefail
           cat > /tmp/payload.json <<'JSON'
           {
             "features": [
@@ -89,47 +127,92 @@ jobs:
           JSON
           jq . /tmp/payload.json
 
-      - name: API /predict (SigV4 with --data-binary)
+      # ---------- API /predict en SigV4 ----------
+      - name: API /predict (SigV4)
         run: |
-          set -euo pipefail
-          URL="${API_BASE%/}${API_PREDICT_PATH}"
-          echo "POST $URL"
-          # Toujours data-binary pour éviter les réécritures de shell
-          code=$(curl -sS -m 35 -A "$UA" -H "Content-Type: application/json" \
-                 --data-binary "@/tmp/payload.json" \
-                 --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
-                 -w "%{http_code}" -o /tmp/predict.json "$URL" || true)
-          test "$code" = "200" || { echo "::error::HTTP $code on /predict"; cat /tmp/predict.json || true; exit 1; }
-          cat /tmp/predict.json
-          jq -e '.predictions|type=="array" and length>=1' /tmp/predict.json >/dev/null
+          python3 - <<'PY'
+import os,sys,requests,json,boto3
+from requests_aws4auth import AWS4Auth
 
-      # ---------------- UI ----------------
-      - name: UI index check (GET via CloudFront, browser UA, retry)
+api_base=os.environ["API_BASE"].rstrip("/")
+url=f"{api_base}{os.environ.get('API_PREDICT_PATH','/predict')}"
+region=os.environ["AWS_REGION"]
+ua=os.environ.get("UA_BROWSER","gh-smoke")
+api_key=os.environ.get("API_SMOKE_KEY","")
+
+with open("/tmp/payload.json","r",encoding="utf-8") as f:
+    payload=json.load(f)
+
+sess=boto3.Session()
+creds=sess.get_credentials().get_frozen_credentials()
+auth=AWS4Auth(creds.access_key,creds.secret_key,region,'execute-api',session_token=creds.token)
+
+h={"User-Agent":ua,"Content-Type":"application/json"}
+if api_key: h["x-api-key"]=api_key
+
+r=requests.post(url,json=payload,auth=auth,headers=h,timeout=30)
+
+print("----- response headers -----")
+for k,v in r.headers.items(): print(f"{k}: {v}")
+print("\n----- response body -----")
+print(r.text)
+
+if r.status_code!=200:
+    print(f"HTTP {r.status_code} on /predict",file=sys.stderr); sys.exit(1)
+
+try:
+    data=r.json()
+except Exception:
+    print("Predict response is not JSON",file=sys.stderr); sys.exit(1)
+
+if ("predictions" not in data) or (not isinstance(data["predictions"],list)) or (len(data["predictions"])<1):
+    print("Missing/invalid 'predictions'",file=sys.stderr); sys.exit(1)
+
+probs=data.get("probabilities")
+if probs is not None:
+    try:
+        vals=[]
+        for row in probs:
+            vals.extend(row if isinstance(row,list) else [row])
+        if not all(0.0<=float(x)<=1.0 for x in vals): raise ValueError
+    except Exception:
+        print("Invalid 'probabilities' values (expected 0..1)",file=sys.stderr); sys.exit(1)
+
+with open("/tmp/predict.json","w",encoding="utf-8") as f:
+    json.dump(data,f,ensure_ascii=False,indent=2)
+PY
+          echo "---- predict.json ----"
+          cat /tmp/predict.json
+
+      # ---------- UI : page index ----------
+      - name: UI index check (GET with retry)
         run: |
           set -euo pipefail
           URL="${UI_BASE%/}/form_validated.html"
-          echo "GET $URL"
-          ok=""
-          for i in $(seq 1 8); do
-            code=$(curl -sS -m 25 -A "$UA" -H "Cache-Control: no-cache" \
-                   -o /tmp/ui.html -w "%{http_code}" "$URL" || true)
-            echo "Try $i: HTTP ${code:-N/A}"
-            if [ "$code" = "200" ] || [ "$code" = "304" ]; then ok="yes"; break; fi
+          echo "GET ${URL}"
+          ok=0
+          for i in {1..8}; do
+            code=$(curl -sS -m 20 -A "${UA_BROWSER}" -o /dev/null -w "%{http_code}" "$URL" || true)
+            echo "Try $i: HTTP ${code}"
+            if [ "$code" = "200" ] || [ "$code" = "304" ]; then ok=1; break; fi
             sleep 5
           done
-          test -n "$ok" || { echo "::error::UI not reachable (last code=$code)"; exit 1; }
+          test "$ok" = "1" || { echo "::error::UI not reachable via CloudFront (code=$code)"; exit 1; }
 
+      # ---------- UI : config.json ----------
       - name: UI config.json check
         run: |
           set -euo pipefail
           CFG="${UI_BASE%/}/config.json"
-          echo "GET $CFG"
-          curl -sS -m 25 -A "$UA" "$CFG" -o /tmp/config.json
+          echo "GET ${CFG}"
+          curl -sS -m 20 -A "${UA_BROWSER}" "$CFG" -o /tmp/config.json
           cat /tmp/config.json
           jq -e '.api_base and .index' /tmp/config.json >/dev/null
 
+      # ---------- Summary ----------
       - name: Summary
         run: |
-          echo "✅ Smoke OK" >> $GITHUB_STEP_SUMMARY
-          echo "- API: ${API_BASE}" >> $GITHUB_STEP_SUMMARY
-          echo "- UI : ${UI_BASE}"  >> $GITHUB_STEP_SUMMARY
+          echo "✅ Smoke tests passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- API base: ${API_BASE}" >> $GITHUB_STEP_SUMMARY
+          echo "- UI  base: ${UI_BASE}"  >> $GITHUB_STEP_SUMMARY
