@@ -2,12 +2,6 @@ name: Smoke tests (UI + API)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
-  workflow_run:
-    workflows:
-      - "UI -> S3 + Invalidation CF"
-    types: [ "completed" ]
 
 concurrency:
   group: smoke-tests-${{ github.ref }}
@@ -19,8 +13,6 @@ permissions:
 
 jobs:
   smoke:
-    # condition en une seule ligne pour éviter les pièges YAML
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -32,7 +24,6 @@ jobs:
       API_HEALTH_PATH:  "/health"
       API_PREDICT_PATH: "/predict"
       UA_BROWSER: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-      HEALTH_SIGV4: "${{ vars.HEALTH_SIGV4 || '' }}"
 
     steps:
       - name: Check required inputs
@@ -60,8 +51,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install requests requests-aws4auth boto3
 
-      # ---------- /health : anonyme via domaine CF, fallback SigV4 optionnel ----------
-      - name: API /health (try anonymous then SigV4)
+      - name: API /health (anonymous)
         run: |
           set -euo pipefail
           URL="${API_BASE%/}${API_HEALTH_PATH}"
@@ -69,43 +59,7 @@ jobs:
           code=$(curl -sS -m 20 -A "${UA_BROWSER}" -w "%{http_code}" -o /tmp/health.out "$URL" || true)
           echo "HTTP $code on /health"
           cat /tmp/health.out || true
-
-          if [ "$code" = "200" ]; then
-            echo "OK /health (anonymous)"
-            exit 0
-          fi
-
-          if [ -n "${HEALTH_SIGV4}" ]; then
-            echo "Anonymous failed ($code) -> retry with SigV4"
-            python3 - <<'PY'
-import os,sys,requests,boto3
-from requests_aws4auth import AWS4Auth
-
-api_base=os.environ["API_BASE"].rstrip("/")
-url=f"{api_base}{os.environ.get('API_HEALTH_PATH','/health')}"
-region=os.environ["AWS_REGION"]
-ua=os.environ.get("UA_BROWSER","gh-smoke")
-api_key=os.environ.get("API_SMOKE_KEY","")
-
-sess=boto3.Session()
-creds=sess.get_credentials().get_frozen_credentials()
-auth=AWS4Auth(creds.access_key,creds.secret_key,region,'execute-api',session_token=creds.token)
-
-h={"User-Agent":ua}
-if api_key: h["x-api-key"]=api_key
-
-r=requests.get(url,auth=auth,headers=h,timeout=20)
-print("----- response headers -----")
-for k,v in r.headers.items(): print(f"{k}: {v}")
-print("\n----- response body -----")
-print(r.text)
-
-if r.status_code!=200:
-    print(f"HTTP {r.status_code} on /health",file=sys.stderr); sys.exit(1)
-PY
-          else
-            echo "::error::HTTP $code on /health"; exit 1
-          fi
+          test "$code" = "200" || { echo "::error::HTTP $code on /health"; exit 1; }
 
       - name: Build smoke payload (30 floats)
         run: |
