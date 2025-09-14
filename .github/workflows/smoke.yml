@@ -185,18 +185,21 @@ jobs:
           cat /tmp/predict.json
 
       # ---------- UI: disponibilité ----------
-    
-      - name: UI index check (GET with retry)
+      - name: UI index check via CloudFront (UA navigateur, avec retry)
         shell: bash
         run: |
           set -euo pipefail
           HTML="${UI_BASE%/}/form_validated.html"
+          UA_BROWSER='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
           echo "GET ${HTML}"
           code=""
           for i in $(seq 1 8); do
-            code=$(curl -sS -m 20 -L -A "${UA}" \
-               -H 'Cache-Control: no-cache' \
-               -o /dev/null -w '%{http_code}' "$HTML" || true)
+          # -L suit les redirections ; -v affiche les en-têtes de réponse (utile en cas d’échec)
+            code=$(curl -sS -m 25 -L -v \
+                  -A "$UA_BROWSER" \
+                  -H 'Accept: text/html,*/*;q=0.8' \
+                  -H 'Cache-Control: no-cache' \
+                  -o /dev/null -w '%{http_code}' "$HTML" 2>&1 | tee /tmp/ui_curl_${i}.log | tail -n1)
             if [[ "$code" == "200" || "$code" == "304" ]]; then
               echo "OK $code"
               exit 0
@@ -204,7 +207,10 @@ jobs:
             echo "Try $i: HTTP ${code:-N/A}; sleep 5s…"
             sleep 5
           done
-          echo "::error::UI not reachable: code=${code:-N/A}"
+          echo "::group::Last response headers"
+          sed -n '1,200p' /tmp/ui_curl_8.log || true
+          echo "::endgroup::"
+          echo "::error::UI inaccessible via CloudFront (HTTP ${code:-N/A}). Probable filtrage WAF/Géo ou UA."
           exit 1
 
    
