@@ -184,19 +184,27 @@ jobs:
           echo "---- predict.json ----"
           cat /tmp/predict.json
 
-      # ---------- UI checks ----------
-      - name: UI index check (HEAD with retry)
+      # ---------- UI: disponibilité ----------
+      - name: UI index check (GET with retry)
         run: |
           set -euo pipefail
           HTML="${UI_BASE%/}/form_validated.html"
-          echo "HEAD ${HTML}"
-          for i in {1..6}; do
-            code=$(curl -sS -m 20 -A "${UA}" -I -o /dev/null -w "%{http_code}" "$HTML" || true)
-            if [ "$code" = "200" ]; then echo "OK 200"; break; fi
-            echo "Try $i: got HTTP ${code:-N/A}; sleep 5s…"; sleep 5
+          echo "GET ${HTML}"
+          # on suit les redirections (-L), on met un UA, on ne garde pas le corps (-o /dev/null)
+          for i in {1..8}; do 
+                 -H "Cache-Control: no-cache" \
+                 -o /dev/null -w "%{http_code}" "$HTML" || true)
+          if [ "$code" = "200" ] || [ "$code" = "304" ]; then
+          echo "OK ${code}"
+          exit 0
+          fi
+          echo "Try $i: HTTP ${code:-N/A}; sleep 5s…"
+          sleep 5
           done
-          test "$code" = "200" || { echo "::error::UI not reachable: code=$code"; exit 1; }
-
+          echo "::error::UI not reachable: code=$code"
+          exit 1
+ 
+   
       - name: UI config.json check
         run: |
           set -euo pipefail
