@@ -1,0 +1,11 @@
+name: YAML sanity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ok:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo
+        run: echo "OK"
