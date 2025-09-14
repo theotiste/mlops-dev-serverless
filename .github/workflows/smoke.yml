@@ -185,25 +185,28 @@ jobs:
           cat /tmp/predict.json
 
       # ---------- UI: disponibilité ----------
+    
       - name: UI index check (GET with retry)
+        shell: bash
         run: |
           set -euo pipefail
           HTML="${UI_BASE%/}/form_validated.html"
           echo "GET ${HTML}"
-          # on suit les redirections (-L), on met un UA, on ne garde pas le corps (-o /dev/null)
-          for i in {1..8}; do 
-                 -H "Cache-Control: no-cache" \
-                 -o /dev/null -w "%{http_code}" "$HTML" || true)
-          if [ "$code" = "200" ] || [ "$code" = "304" ]; then
-          echo "OK ${code}"
-          exit 0
-          fi
-          echo "Try $i: HTTP ${code:-N/A}; sleep 5s…"
-          sleep 5
+          code=""
+          for i in $(seq 1 8); do
+            code=$(curl -sS -m 20 -L -A "${UA}" \
+               -H 'Cache-Control: no-cache' \
+               -o /dev/null -w '%{http_code}' "$HTML" || true)
+            if [[ "$code" == "200" || "$code" == "304" ]]; then
+              echo "OK $code"
+              exit 0
+            fi
+            echo "Try $i: HTTP ${code:-N/A}; sleep 5s…"
+            sleep 5
           done
-          echo "::error::UI not reachable: code=$code"
+          echo "::error::UI not reachable: code=${code:-N/A}"
           exit 1
- 
+
    
       - name: UI config.json check
         run: |
