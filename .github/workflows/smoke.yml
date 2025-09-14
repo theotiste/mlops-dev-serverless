@@ -1,14 +1,13 @@
-# .github/workflows/smoke.yml
 name: Smoke tests (UI + API)
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   workflow_run:
     workflows:
-      - "UI → S3 + Invalidation CF"
-    types: [completed]
+      - "UI -> S3 + Invalidation CF"
+    types: [ "completed" ]
 
 concurrency:
   group: smoke-tests-${{ github.ref }}
@@ -20,32 +19,28 @@ permissions:
 
 jobs:
   smoke:
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    # condition en une seule ligne pour éviter les pièges YAML
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     env:
-      API_BASE:     ${{ vars.API_BASE     || secrets.API_BASE     }}
-      UI_BASE:      ${{ vars.UI_BASE      || secrets.UI_BASE      }}
-      AWS_REGION:   ${{ vars.AWS_REGION   || secrets.AWS_REGION   || 'eu-west-3' }}
-      API_SMOKE_KEY: ${{ secrets.API_SMOKE_KEY || '' }}
-      API_HEALTH_PATH:  /health
-      API_PREDICT_PATH: /predict
-      # UA “navigateur” pour éviter WAF/anti-bot
+      API_BASE:       ${{ vars.API_BASE     || secrets.API_BASE }}
+      UI_BASE:        ${{ vars.UI_BASE      || secrets.UI_BASE }}
+      AWS_REGION:     ${{ vars.AWS_REGION   || secrets.AWS_REGION || 'eu-west-3' }}
+      API_SMOKE_KEY:  ${{ secrets.API_SMOKE_KEY || '' }}
+      API_HEALTH_PATH:  "/health"
+      API_PREDICT_PATH: "/predict"
       UA_BROWSER: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-      # Fallback SigV4 pour /health si nécessaire
-      HEALTH_SIGV4: ${{ vars.HEALTH_SIGV4 || 'false' }}
+      HEALTH_SIGV4: "${{ vars.HEALTH_SIGV4 || '' }}"
 
     steps:
       - name: Check required inputs
         run: |
           set -euo pipefail
-          test -n "${API_BASE:-}"    || { echo "::error::Missing API_BASE"; exit 1; }
-          test -n "${UI_BASE:-}"     || { echo "::error::Missing UI_BASE";  exit 1; }
-          test -n "${AWS_REGION:-}"  || { echo "::error::Missing AWS_REGION"; exit 1; }
+          test -n "${API_BASE:-}"      || { echo "::error::Missing API_BASE"; exit 1; }
+          test -n "${UI_BASE:-}"       || { echo "::error::Missing UI_BASE"; exit 1; }
+          test -n "${AWS_REGION:-}"    || { echo "::error::Missing AWS_REGION"; exit 1; }
           test -n "${{ secrets.AWS_ROLE_ARN }}" || { echo "::error::Missing secret AWS_ROLE_ARN"; exit 1; }
           echo "API_BASE=${API_BASE}"
           echo "UI_BASE=${UI_BASE}"
@@ -55,9 +50,8 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region:     ${{ env.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
-        # Outils + lib SigV4 Python
       - name: Install tools (jq + Python deps)
         run: |
           set -euo pipefail
@@ -66,7 +60,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install requests requests-aws4auth boto3
 
-      # ---------- API /health : anonyme via CloudFront, fallback SigV4 (optionnel) ----------
+      # ---------- /health : anonyme via domaine CF, fallback SigV4 optionnel ----------
       - name: API /health (try anonymous then SigV4)
         run: |
           set -euo pipefail
@@ -81,8 +75,8 @@ jobs:
             exit 0
           fi
 
-          if [ "${HEALTH_SIGV4}" = "true" ]; then
-            echo "Anonymous failed ($code) → retry with SigV4"
+          if [ -n "${HEALTH_SIGV4}" ]; then
+            echo "Anonymous failed ($code) -> retry with SigV4"
             python3 - <<'PY'
 import os,sys,requests,boto3
 from requests_aws4auth import AWS4Auth
@@ -113,9 +107,9 @@ PY
             echo "::error::HTTP $code on /health"; exit 1
           fi
 
-      # ---------- payload de test ----------
       - name: Build smoke payload (30 floats)
         run: |
+          set -euo pipefail
           cat > /tmp/payload.json <<'JSON'
           {
             "features": [
@@ -127,9 +121,9 @@ PY
           JSON
           jq . /tmp/payload.json
 
-      # ---------- API /predict en SigV4 ----------
       - name: API /predict (SigV4)
         run: |
+          set -euo pipefail
           python3 - <<'PY'
 import os,sys,requests,json,boto3
 from requests_aws4auth import AWS4Auth
@@ -184,7 +178,6 @@ PY
           echo "---- predict.json ----"
           cat /tmp/predict.json
 
-      # ---------- UI : page index ----------
       - name: UI index check (GET with retry)
         run: |
           set -euo pipefail
@@ -199,7 +192,6 @@ PY
           done
           test "$ok" = "1" || { echo "::error::UI not reachable via CloudFront (code=$code)"; exit 1; }
 
-      # ---------- UI : config.json ----------
       - name: UI config.json check
         run: |
           set -euo pipefail
@@ -209,10 +201,8 @@ PY
           cat /tmp/config.json
           jq -e '.api_base and .index' /tmp/config.json >/dev/null
 
-      # ---------- Summary ----------
       - name: Summary
         run: |
           echo "✅ Smoke tests passed" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "- API base: ${API_BASE}" >> $GITHUB_STEP_SUMMARY
           echo "- UI  base: ${UI_BASE}"  >> $GITHUB_STEP_SUMMARY
