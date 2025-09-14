@@ -1,3 +1,4 @@
+# .github/workflows/ui-amplify-api.yml
 name: UI → S3 + Invalidation CF
 
 on:
@@ -5,42 +6,37 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'ui/**'
-      - '.github/workflows/ui-amplify-api.yml'
-
-concurrency:
-  group: ui-deploy-${{ github.ref }}
-  cancel-in-progress: true
+      - "ui/**"
+      - ".github/workflows/ui-amplify-api.yml"
 
 permissions:
-  id-token: write    # OIDC pour assumer le rôle AWS
+  id-token: write
   contents: read
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'eu-west-3' }}
-  S3_BUCKET:  ${{ vars.UI_BUCKET || secrets.UI_BUCKET }}
-  CF_DIST_ID: ${{ vars.CF_DIST_ID || secrets.CF_DIST_ID }}
-  UI_API_BASE: ${{ vars.API_BASE || secrets.API_BASE }}   # ex: https://xxxxx.execute-api.eu-west-3.amazonaws.com/dev
-  UI_INDEX:    ${{ vars.UI_INDEX || 'form_validated.html' }}
+  AWS_REGION:    ${{ vars.AWS_REGION    || secrets.AWS_REGION    || 'eu-west-3' }}
+  S3_BUCKET:     ${{ vars.S3_BUCKET     || secrets.S3_BUCKET     }}
+  CF_DISTR_ID:   ${{ vars.CF_DISTR_ID   || secrets.CF_DISTR_ID   }}
+  UI_BASE:       ${{ vars.UI_BASE       || secrets.UI_BASE       }}  # https://form.mlopstheotiste.fr
+  API_BASE:      ${{ vars.API_BASE      || secrets.API_BASE      }}  # https://api.mlopstheotiste.fr
+  UI_PREFIX:     public/   # on sert depuis s3://<bucket>/public/
 
 jobs:
-  ui:
+  ui-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
 
     steps:
-      - name: Check inputs
-        run: |
-          set -euo pipefail
-          test -n "${S3_BUCKET:-}"  || { echo "::error::Missing S3 bucket (UI_S3_BUCKET)"; exit 1; }
-          test -n "${UI_API_BASE:-}" || { echo "::error::Missing UI_API_BASE"; exit 1; }
-          echo "Region=${AWS_REGION}"
-          echo "Bucket=${S3_BUCKET}"
-          echo "UI_API_BASE=${UI_API_BASE}"
-          echo "UI_INDEX=${UI_INDEX}"
-
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check required inputs
+        run: |
+          set -euo pipefail
+          test -n "${S3_BUCKET:-}"   || { echo "::error::Missing S3_BUCKET"; exit 1; }
+          test -n "${CF_DISTR_ID:-}" || { echo "::error::Missing CF_DISTR_ID"; exit 1; }
+          test -n "${UI_BASE:-}"     || { echo "::warning::UI_BASE not set (used only for info)"; }
+          test -n "${API_BASE:-}"    || { echo "::warning::API_BASE not set (config.json)"; }
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -48,47 +44,48 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # génère config.json attendu par l'UI
-      - name: Build ui/config.json
-        working-directory: ui
+      - name: Ensure ui/ folder exists
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, os
-          cfg = {
-            "api_base": os.environ["UI_API_BASE"].rstrip("/"),
-            "index":    os.environ.get("UI_INDEX","form_validated.html")
+          mkdir -p ui
+          # Si tu génères le HTML ailleurs, copie/compile ici avant le sync.
+
+      - name: Write/patch config.json
+        run: |
+          set -euo pipefail
+          cat > ui/config.json <<JSON
+          {
+            "api_base": "${API_BASE}",
+            "index": "form_validated.html"
           }
-          with open("config.json","w",encoding="utf-8") as f:
-              json.dump(cfg,f,ensure_ascii=False,indent=2)
-          print("---- ui/config.json ----")
-          print(json.dumps(cfg,indent=2,ensure_ascii=False))
-          PY
+          JSON
+          jq . ui/config.json
 
-      # upload propre + headers corrects (HTML/JSON non mis en cache)
-      - name: Sync UI to S3
+      - name: Sync UI to S3 (to prefix "${{ env.UI_PREFIX }}")
         run: |
           set -euo pipefail
-          aws s3 sync ./ui "s3://${S3_BUCKET}/" --delete --only-show-errors
-          # remplace les métadonnées pour html/json afin d'éviter le cache agressif
-          aws s3 cp "s3://${S3_BUCKET}/" "s3://${S3_BUCKET}/" \
-            --recursive --exclude "*" --include "*.html" --include "*.json" \
-            --metadata-directive REPLACE --cache-control "no-cache, no-store, must-revalidate" \
-            --content-type "text/html"
+          aws s3 sync ui/ "s3://${S3_BUCKET}/${UI_PREFIX}" --delete
 
-      - name: Optional CloudFront invalidation
-        if: env.CF_DIST_ID != ''
+          # Forcer les bons Content-Type pour les fichiers critiques
+          aws s3 cp "ui/config.json" "s3://${S3_BUCKET}/${UI_PREFIX}config.json" \
+            --metadata-directive REPLACE --content-type application/json
+
+          # (optionnel) No-cache sur le HTML si tu veux voir les changements instantanément
+          aws s3 cp "ui/form_validated.html" "s3://${S3_BUCKET}/${UI_PREFIX}form_validated.html" \
+            --metadata-directive REPLACE --content-type text/html --cache-control "no-cache"
+
+          aws s3 cp "ui/result.html" "s3://${S3_BUCKET}/${UI_PREFIX}result.html" \
+            --metadata-directive REPLACE --content-type text/html --cache-control "no-cache"
+
+      - name: Invalidate CloudFront
         run: |
           set -euo pipefail
           aws cloudfront create-invalidation \
-            --distribution-id "${CF_DIST_ID}" \
-            --paths "/*" >/dev/null
-          echo "CloudFront invalidation requested."
+            --distribution-id "${CF_DISTR_ID}" \
+            --paths "/form_validated.html" "/result.html" "/config.json"
 
       - name: Summary
         run: |
-          echo "✅ UI déployée sur s3://${S3_BUCKET}" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${CF_DIST_ID:-}" ]; then
-            echo "⚡ Invalidation CloudFront: ${CF_DIST_ID}" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "- API base pour l'UI: ${UI_API_BASE}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ UI déployée sur s3://${S3_BUCKET}/${UI_PREFIX}" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 UI: ${UI_BASE}" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 API base pour l'UI: ${API_BASE}" >> $GITHUB_STEP_SUMMARY
