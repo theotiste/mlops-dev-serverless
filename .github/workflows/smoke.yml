@@ -54,7 +54,35 @@ jobs:
           role-session-name: gha-17742289298
           audience: sts.amazonaws.com
           output-env-credentials: true
-   
+
+      - name: Install awscurl (SigV4)
+        run: |
+          python3 -m pip install --user --upgrade pip awscurl
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          awscurl --version
+
+      - name: Build payload
+        run: |
+          cat > /tmp/payload.json <<'JSON'
+          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
+          JSON
+
+      - name: /health (public)
+        run: |
+          set -euo pipefail
+          curl -sS -i "https://${{ env.API_HOST }}${{ env.HEALTH_PATH }}"
+
+      - name: /predict (SigV4, IAM) with awscurl
+        run: |
+          set -euo pipefail
+          # -v pour voir les headers (dont Authorization) si besoin
+          awscurl -v \
+            --region "${AWS_REGION}" \
+            --service execute-api \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data @/tmp/payload.json \
+            "https://${API_HOST}${PREDICT_PATH}"
      
       # Installe un curl QUI SAIT signer SigV4 et expose son chemin
       - name: Install curl with SigV4
