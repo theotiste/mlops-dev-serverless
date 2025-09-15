@@ -80,8 +80,42 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS -i "https://api.mlopstheotiste.fr/health" | tee /tmp/health.txt
-          grep -q 'HTTP/2 200' /tmp/health.txt
+          grep -q 'HTTP/2 200' /tmp/health.txt    
+          
+      - name: /predict (SigV4, IAM)
+        env:
+          AWS_REGION: eu-west-3
+          API_HOST: api.mlopstheotiste.fr
+        run: |
+          set -euo pipefail
 
+          # payload de test
+          cat >/tmp/payload.json <<'JSON'
+          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
+          JSON
+
+          echo "Using AWS env (masqué) :"
+          env | grep -E '^AWS_(ACCESS|SECRET|SESSION|REGION|DEFAULT_REGION)=' \
+            | sed -E 's/=.*/=<masked>/' || true
+
+          # Appel verbeux pour voir les en-têtes envoyés
+          curl -v --http1.1 \
+            --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
+            -H "Host: ${API_HOST}" \
+            -H "Content-Type: application/json" \
+            -H "X-Amz-Security-Token: ${AWS_SESSION_TOKEN}" \
+            --data-binary @/tmp/payload.json \
+            "https://${API_HOST}/predict" 2>&1 | tee /tmp/curl.out
+
+          echo "---- Vérification de l'en-tête Authorization ----"
+          if ! grep -E '^> Authorization: AWS4-HMAC-SHA256' /tmp/curl.out >/dev/null; then
+            echo "ERREUR: l'en-tête Authorization SigV4 n'a pas été envoyé."
+            exit 2
+          fi
+
+          echo "---- Vérification HTTP 200 ----"
+          grep -q '^< HTTP/2 200' /tmp/curl.out
+    
       - name: /predict (SigV4, IAM)
         env:
           REGION: eu-west-3
