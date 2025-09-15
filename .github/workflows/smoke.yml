@@ -13,53 +13,39 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     env:
-      # Saisis ces valeurs via Repository » Settings » Secrets and variables
       AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-3' }}
       API_BASE:   ${{ vars.API_BASE   || secrets.API_BASE }}
       UI_BASE:    ${{ vars.UI_BASE    || secrets.UI_BASE }}
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      UA: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36 GitHubActionsSmoke
+      UA: Mozilla/5.0 GitHubActionsSmoke
 
     steps:
-      - name: Check required inputs
-        run: |
-          set -euo pipefail
-          : "${API_BASE:?Missing API_BASE}"
-          : "${UI_BASE:?Missing UI_BASE}"
-          : "${AWS_ROLE_ARN:?Missing AWS_ROLE_ARN}"
-          echo "API_BASE=$API_BASE"
-          echo "UI_BASE=$UI_BASE"
-          echo "AWS_REGION=$AWS_REGION"
-
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install tools (jq)
+      - name: Check inputs
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+          set -euo pipefail
+          : "${API_BASE:?Missing API_BASE}"
+          : "${UI_BASE:?Missing UI_BASE}"
 
-      # ---- API /health : anonyme puis SigV4 si 403/401 ----
-      - name: API /health (try anonymous then SigV4)
+      - name: Install jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: API /health (SigV4)
         run: |
           set -euo pipefail
           URL="${API_BASE%/}/health"
-          echo "GET $URL"
-          code=$(curl -sS -m 20 -o /tmp/health.json -w '%{http_code}' "$URL" || true)
-          if [ "$code" != "200" ]; then
-            echo "Anonymous failed ($code) → retry with SigV4"
-            code=$(curl -sS -m 20 -o /tmp/health.json -w '%{http_code}' \
-              --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" "$URL" || true)
-          fi
+          code=$(curl -sS -m 20 -o /tmp/health.json -w '%{http_code}' \
+            --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" "$URL")
           cat /tmp/health.json
           test "$code" = "200"
 
-      - name: Build smoke payload (30 floats)
+      - name: Build payload
         run: |
           cat > /tmp/payload.json <<'JSON'
           {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.080]}
@@ -70,7 +56,6 @@ jobs:
         run: |
           set -euo pipefail
           URL="${API_BASE%/}/predict"
-          echo "POST $URL"
           code=$(curl -sS -m 25 -o /tmp/predict.json -w '%{http_code}' \
             -H "Content-Type: application/json" \
             --data-binary @/tmp/payload.json \
@@ -79,30 +64,16 @@ jobs:
           test "$code" = "200"
           jq -e '.predictions and (.predictions|length>0)' /tmp/predict.json >/dev/null
 
-      # ---- UI via CloudFront ----
-      - name: UI index check (GET with retry)
+      - name: UI index
         run: |
           set -euo pipefail
           URL="${UI_BASE%/}/form_validated.html"
-          echo "GET $URL"
-          for i in 1 2 3 4 5 6 7 8; do
-            code=$(curl -sS -m 20 -A "${UA}" -H 'Accept: text/html' \
-                   -o /dev/null -w '%{http_code}' "$URL" || true)
-            [ "$code" = "200" ] && break
-            echo "Try $i: HTTP $code; sleep 5s…"; sleep 5
-          done
+          code=$(curl -sS -m 20 -A "${UA}" -o /dev/null -w '%{http_code}' "$URL" || true)
           test "$code" = "200"
 
-      - name: UI config.json check
+      - name: UI config.json
         run: |
           set -euo pipefail
           CFG="${UI_BASE%/}/config.json"
-          echo "GET $CFG"
           curl -sS -m 20 -A "${UA}" "$CFG" | tee /tmp/cfg.json >/dev/null
           jq -e '.api_base and .index' /tmp/cfg.json >/dev/null
-
-      - name: Summary
-        run: |
-          echo "✅ Smoke tests passed" >> "$GITHUB_STEP_SUMMARY"
-          echo "- API base: ${API_BASE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- UI  base: ${UI_BASE}" >> "$GITHUB_STEP_SUMMARY"
