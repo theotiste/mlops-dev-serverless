@@ -1,11 +1,24 @@
-name: YAML sanity
+mkdir -p .github/workflows
 
+cat > .github/workflows/sanity.yml <<'YAML'
+name: Sanity (YAML & runner)
 on:
   workflow_dispatch:
 
 jobs:
-  ok:
+  hello:
     runs-on: ubuntu-latest
     steps:
-      - name: Echo
-        run: echo "OK"
+      - name: Say hello
+        run: |
+          set -eu
+          echo "Runner OK, YAML OK, repo=$GITHUB_REPOSITORY"
+YAML
+
+# Recommandé : forcer les fins de lignes LF et virer les TAB
+git config core.autocrlf input
+sed -i 's/\t/  /g' .github/workflows/sanity.yml
+
+git add .github/workflows/sanity.yml
+git commit -m "chore: add sanity workflow"
+git push
