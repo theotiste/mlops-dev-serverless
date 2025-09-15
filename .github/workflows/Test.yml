@@ -1,0 +1,138 @@
+name: Smoke tests (UI + API, IAM + SigV4)
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_id:
+        description: "ID REST API Gateway (ex: elh9s0fhdk)"
+        required: true
+      api_stage:
+        description: "Stage de l'API (ex: dev)"
+        default: "dev"
+        required: true
+      aws_region:
+        description: "Région AWS (ex: eu-west-3)"
+        default: "eu-west-3"
+        required: true
+      # Optionnel : domaine personnalisé pour l’API (sinon = execute-api.*)
+      api_domain:
+        description: "Domaine personnalisé de l’API (ex: api.mlopstheotiste.fr)"
+        required: false
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: eu-west-3
+  API_HOST: api.mlopstheotiste.fr      
+  HEALTH_PATH: /health
+  PREDICT_PATH: /predict
+
+
+# Prérequis: rôle IAM OIDC avec la trust policy GitHub et la policy execute-api:Invoke
+# + base path mapping sur api.mlopstheotiste.fr -> API elh9s0fhdk / stage dev
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC -> crédentials temporaires dans env (AWS_* disponibles)
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
+          aws-region: eu-west-3
+          role-session-name: gha-17742289298
+          audience: sts.amazonaws.com
+          output-env-credentials: true
+
+      - name: Install awscurl (SigV4)
+        run: |
+          python3 -m pip install --user --upgrade pip awscurl
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Build payload
+        run: |
+          cat > /tmp/payload.json <<'JSON'
+          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
+          JSON
+      - name: /health (public)
+        run: |
+          set -euo pipefail
+          curl -sS -i "https://${{ env.API_HOST }}${{ env.HEALTH_PATH }}"
+      - name: /predict (SigV4, IAM) with awscurl
+        run: |
+          set -euo pipefail
+          # -v pour voir les headers (dont Authorization) si besoin
+          awscurl -v \
+            --region "${AWS_REGION}" \
+            --service execute-api \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data @/tmp/payload.json \
+            "https://${API_HOST}${PREDICT_PATH}"
+     
+      # Installe un curl QUI SAIT signer SigV4 et expose son chemin
+      - name: Install curl with SigV4
+        run: |
+          brew install curl
+          echo "CURL=$(brew --prefix)/opt/curl/bin/curl" >> $GITHUB_ENV
+          ${{ env.CURL }} -V | sed -n '1p;/Features/p'  # doit afficher 'aws-sigv4'
+      - name: Build payload
+        run: |
+          cat > /tmp/payload.json <<'JSON'
+          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
+          JSON
+          jq -C . /tmp/payload.json || true
+          
+      - name: /health (public)
+        run: |
+          set -euo pipefail
+          curl -fsS -i "https://api.mlopstheotiste.fr/health" | tee /tmp/health.txt
+          grep -q 'HTTP/2 200' /tmp/health.txt
+      - name: /predict (SigV4, IAM)
+        env:
+          REGION: eu-west-3
+        run: |
+          set -euo pipefail
+          cat >/tmp/payload.json <<'JSON'
+          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
+          JSON
+          # Signature SigV4 faite par curl (nécessite les creds OIDC configurés juste au-dessus)
+          curl -fsS -i \
+            --aws-sigv4 "aws:amz:${REGION}:execute-api" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/payload.json \
+            "https://api.mlopstheotiste.fr/predict" | tee /tmp/predict.txt
+          grep -q 'HTTP/2 200' /tmp/predict.txt
+    
+
+      - name: /health (public)
+        run: |
+          set -euo pipefail
+          ${{ env.CURL }} -sS -i "https://${{ env.API_HOST }}${{ env.HEALTH_PATH }}"
+      - name: /predict (SigV4, IAM)
+        run: |
+          set -euo pipefail
+          # Appel signé – on force le Host + on passe le token de session
+          ${{ env.CURL }} -sS -v \
+            --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
+            -H "Host: ${API_HOST}" \
+            -H "Content-Type: application/json" \
+            -H "X-Amz-Security-Token: ${AWS_SESSION_TOKEN}" \
+            --data-binary @/tmp/payload.json \
+            "https://${API_HOST}${PREDICT_PATH}" 2>&1 | tee /tmp/curl.out
+          # Vérification défensive : l’en-tête Authorization doit être présent
+          if ! grep -qiE '^> Authorization: AWS4-HMAC-SHA256' /tmp/curl.out; then
+            echo "ERREUR: l'en-tête Authorization SigV4 n'a pas été envoyé." >&2
+            echo "curl utilisé : $({{ env.CURL }} -V | head -1)" >&2
+            exit 2
+          fi
