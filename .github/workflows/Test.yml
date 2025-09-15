@@ -48,7 +48,7 @@ jobs:
       # OIDC -> crédentials temporaires dans env (AWS_* disponibles)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
-        with:#
+        with:
           role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
           aws-region: eu-west-3
           role-session-name: gha-17742289298
@@ -58,9 +58,9 @@ jobs:
       - name: Install awscurl (SigV4)
         run: |
           python3 -m pip install --user --upgrade pip awscurl
-        #  echo "$HOME/.local/bin" >> $GITHUB_PATH    
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+         
 
-      
       - name: Build payload
         run: |
           cat > /tmp/payload.json <<'JSON'
