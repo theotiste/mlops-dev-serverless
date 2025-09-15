@@ -34,6 +34,7 @@ env:
   API_HOST: api.mlopstheotiste.fr      
   HEALTH_PATH: /health
   PREDICT_PATH: /predict
+  BASE_URL: ${{ vars.API_BASE_URL }}
 
 
 # Prérequis: rôle IAM OIDC avec la trust policy GitHub et la policy execute-api:Invoke
