@@ -58,7 +58,9 @@ jobs:
       - name: Install awscurl (SigV4)
         run: |
           python3 -m pip install --user --upgrade pip awscurl
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> $GITHUB_PATH    
+
+      
       - name: Build payload
         run: |
           cat > /tmp/payload.json <<'JSON'
