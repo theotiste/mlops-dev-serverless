@@ -49,9 +49,15 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::571600829584:role/GitHub-OIDC-Role
-          aws-region: ${{ env.AWS_REGION }}
-
+          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
+          aws-region: eu-west-3
+          role-session-name: gha-17742289298
+          audience: sts.amazonaws.com
+          output-env-credentials: true
+   
+#Assuming role with OIDC
+#Authenticated as assumedRoleId AROAYKFQQPSIHDKBQDDA7:gha-17742289298
+     
       # Installe un curl QUI SAIT signer SigV4 et expose son chemin
       - name: Install curl with SigV4
         run: |
