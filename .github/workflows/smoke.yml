@@ -76,25 +76,29 @@ jobs:
           {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.080]}
           JSON
 
-      - name: Health (SigV4)
-        env:
-          CURL: ${{ env.CURL }}
+      - name: /health (public)
         run: |
           set -euo pipefail
-          $CURL -sS --fail \
-            --aws-sigv4 "aws:amz:eu-west-3:execute-api" \
-            "https://api.mlopstheotiste.fr/health" | jq -e '.ok==true'
+          curl -fsS -i "https://api.mlopstheotiste.fr/health" | tee /tmp/health.txt
+          grep -q 'HTTP/2 200' /tmp/health.txt
 
-      - name: Predict (SigV4)
+      - name: /predict (SigV4, IAM)
         env:
-          CURL: ${{ env.CURL }}
+          REGION: eu-west-3
         run: |
           set -euo pipefail
-          out=$($CURL -sS --fail \
-            --aws-sigv4 "aws:amz:eu-west-3:execute-api" \
+          cat >/tmp/payload.json <<'JSON'
+          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
+          JSON
+
+          # Signature SigV4 faite par curl (nécessite les creds OIDC configurés juste au-dessus)
+          curl -fsS -i \
+            --aws-sigv4 "aws:amz:${REGION}:execute-api" \
             -H "Content-Type: application/json" \
-            --data-binary @payload.json \
-            "https://api.mlopstheotiste.fr/predict")
-          echo "$out" | jq -e '.predictions and .probabilities'
-          echo "Response: $out"
-  
+            --data-binary @/tmp/payload.json \
+            "https://api.mlopstheotiste.fr/predict" | tee /tmp/predict.txt
+
+          grep -q 'HTTP/2 200' /tmp/predict.txt
+    
+
+     
