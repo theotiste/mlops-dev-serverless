@@ -36,160 +36,65 @@ env:
   AWS_REGION: ${{ inputs.aws_region || 'eu-west-3' }}
   API_DOMAIN: ${{ inputs.api_domain || '' }}
 
+# Prérequis: rôle IAM OIDC avec la trust policy GitHub et la policy execute-api:Invoke
+# + base path mapping sur api.mlopstheotiste.fr -> API elh9s0fhdk / stage dev
+
 jobs:
   smoke:
-    name: Smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    permissions:
+      id-token: write
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: ${{ env.AWS_REGION }}
-          # ⚠️ remplace par TON rôle OIDC :
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GitHubOIDCServerlessDeployer
-          role-session-name: smoke-ci
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GHA-Smoke-Role
+          aws-region: eu-west-3
 
-      - name: Echo context
+      - name: Install curl with SigV4
         run: |
-          set -euo pipefail
-          echo "API_ID=${API_ID}"
-          echo "API_STAGE=${API_STAGE}"
-          echo "AWS_REGION=${AWS_REGION}"
-          if [ -n "${API_DOMAIN}" ]; then echo "API_DOMAIN=${API_DOMAIN}"; fi
-
-      - name: Check curl SigV4 support (upgrade if needed)
-        run: |
-          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y curl jq
+          curl --version | head -1
+          # si l’option --aws-sigv4 n’est pas là, installe le binaire Homebrew:
           if ! curl --help all 2>/dev/null | grep -q -- '--aws-sigv4'; then
-            echo "curl sans --aws-sigv4, mise à jour…"
-            sudo apt-get update -y
-            sudo apt-get install -y curl ca-certificates
-            curl --version
-            curl --help all | grep -- '--aws-sigv4' || { echo "curl sans --aws-sigv4 après upgrade"; exit 1; }
+            /bin/bash -lc "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> $GITHUB_ENV
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+            brew install curl
+            echo "CURL=/home/linuxbrew/.linuxbrew/opt/curl/bin/curl" >> $GITHUB_ENV
+          else
+            echo "CURL=curl" >> $GITHUB_ENV
           fi
 
-      # ---------- Harmonisation sécurité côté API ----------
-      - name: Discover resource IDs for /health and /predict
-        id: discover
+      - name: Build payload
         run: |
-          set -euo pipefail
-          json="$(aws apigateway get-resources --rest-api-id "${API_ID}" --region "${AWS_REGION}" --limit 500)"
-
-          get_id() { echo "${json}" | jq -r --arg p "$1" '.items[] | select(.path==$p) | .id' | sed 's/null//'; }
-
-          HEALTH_ID="$(get_id "/health")"
-          PREDICT_ID="$(get_id "/predict")"
-
-          if [ -z "${HEALTH_ID}" ] || [ -z "${PREDICT_ID}" ]; then
-            echo "Impossible de trouver les ressources /health (${HEALTH_ID}) et /predict (${PREDICT_ID})."
-            echo "Vérifie que ces routes existent dans l'API ${API_ID}."
-            exit 1
-          fi
-
-          echo "HEALTH_ID=${HEALTH_ID}"   | tee -a "$GITHUB_OUTPUT"
-          echo "PREDICT_ID=${PREDICT_ID}" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Ensure methods use AWS_IAM (idempotent)
-        run: |
-          set -euo pipefail
-          HEALTH_ID="${{ steps.discover.outputs.HEALTH_ID }}"
-          PREDICT_ID="${{ steps.discover.outputs.PREDICT_ID }}"
-
-          ensure_iam() {
-            local res_id="$1" method="$2"
-            # Change ONLY if nécessaire (patch idempotent)
-            aws apigateway update-method \
-              --rest-api-id "${API_ID}" \
-              --resource-id "${res_id}" \
-              --http-method "${method}" \
-              --patch-operations \
-                op=replace,path=/authorizationType,value=AWS_IAM \
-                op=replace,path=/apiKeyRequired,value=false \
-              --region "${AWS_REGION}" >/dev/null
-          }
-
-          ensure_iam "${HEALTH_ID}"  GET
-          ensure_iam "${PREDICT_ID}" POST
-
-      - name: Redeploy stage (apply method changes)
-        run: |
-          set -euo pipefail
-          aws apigateway create-deployment \
-            --rest-api-id "${API_ID}" \
-            --stage-name "${API_STAGE}" \
-            --description "Auth=IAM for /health and /predict (CI)" \
-            --region "${AWS_REGION}" >/dev/null
-
-      # ---------- Tests API signés SigV4 ----------
-      - name: Build smoke payload (30 floats)
-        run: |
-          set -euo pipefail
           cat > payload.json <<'JSON'
           {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.080]}
           JSON
-          jq -c . payload.json
 
-      - name: Compute API host
-        id: host
+      - name: Health (SigV4)
+        env:
+          CURL: ${{ env.CURL }}
         run: |
           set -euo pipefail
-          if [ -n "${API_DOMAIN}" ]; then
-            host="${API_DOMAIN}"
-          else
-            host="${API_ID}.execute-api.${AWS_REGION}.amazonaws.com"
-          fi
-          echo "HOST=${host}" | tee -a "$GITHUB_OUTPUT"
+          $CURL -sS --fail \
+            --aws-sigv4 "aws:amz:eu-west-3:execute-api" \
+            "https://api.mlopstheotiste.fr/health" | jq -e '.ok==true'
 
-      - name: API /health (SigV4)
+      - name: Predict (SigV4)
+        env:
+          CURL: ${{ env.CURL }}
         run: |
           set -euo pipefail
-          HOST="${{ steps.host.outputs.HOST }}"
-          URL="https://${HOST}/${API_STAGE}/health"
-          echo "GET $URL"
-          # 3 tentatives (déploiement à chaud, propagation, etc.)
-          for i in 1 2 3; do
-            set +e
-            out="$(curl -sS --fail \
-              --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
-              --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
-              -H "x-amz-security-token: ${AWS_SESSION_TOKEN}" \
-              "$URL" 2>&1)"
-            code=$?
-            set -e
-            if [ $code -eq 0 ]; then
-              echo "$out"
-              echo "OK /health"
-              exit 0
-            fi
-            echo "Try ${i}: failure (${code}), retry in 5s…"
-            sleep 5
-          done
-          echo "Echec /health (SigV4)"; exit 1
-
-      - name: API /predict (SigV4)
-        run: |
-          set -euo pipefail
-          HOST="${{ steps.host.outputs.HOST }}"
-          URL="https://${HOST}/${API_STAGE}/predict"
-          echo "POST $URL"
-          curl -sS --fail-with-body \
-            --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
-            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
-            -H "x-amz-security-token: ${AWS_SESSION_TOKEN}" \
+          out=$($CURL -sS --fail \
+            --aws-sigv4 "aws:amz:eu-west-3:execute-api" \
             -H "Content-Type: application/json" \
             --data-binary @payload.json \
-            "$URL" \
-            | tee /tmp/predict.json
-
-          # Sanity rapide du JSON
-          jq -e '.predictions and .probabilities' /tmp/predict.json >/dev/null || {
-            echo "Réponse inattendue de /predict"; cat /tmp/predict.json; exit 1; }
-
-      - name: Summary
-        run: |
-          echo "✅ API OK (IAM + SigV4)"
+            "https://api.mlopstheotiste.fr/predict")
+          echo "$out" | jq -e '.predictions and .probabilities'
+          echo "Response: $out"
+  
