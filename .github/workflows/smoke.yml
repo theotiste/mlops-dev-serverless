@@ -47,19 +47,19 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure AWS (OIDC)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GHA-Smoke-Role
+          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
           aws-region: eu-west-3
+          role-session-name: gha-${{ github.run_id }}
 
       - name: Install curl with SigV4
         run: |
           sudo apt-get update -y
           sudo apt-get install -y curl jq
           curl --version | head -1
-          # si l’option --aws-sigv4 n’est pas là, installe le binaire Homebrew:
+          # si l’option --aws-sigv4 n’est pas là, installe le binaire Hoebrew:
           if ! curl --help all 2>/dev/null | grep -q -- '--aws-sigv4'; then
             /bin/bash -lc "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
             echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> $GITHUB_ENV
