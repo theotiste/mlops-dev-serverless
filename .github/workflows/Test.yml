@@ -75,20 +75,19 @@ jobs:
           CODE=$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time $TIMEOUT_S "$BASE_URL/health")
           echo "HTTP $CODE"
           test "$CODE" = "200"
-
+          
       - name: Install awscurl
-        shell: bash
         run: |
           python3 -m pip install --upgrade --user awscurl
           echo "$HOME/.local/bin" >> $GITHUB_PATH
+  
 
       - name: /health (SigV4 via curl)
         shell: bash
         run: |
           set -euo pipefail
           CODE=$(curl -sS --fail -o /dev/null -w "%{http_code}" \
-            --connect-timeout 10 --max-time $TIMEOUT_S \
-            --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
+            --connect-timeout 10 --max-time $TIMEOUT_S             --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
             -H "X-Amz-Content-Sha256: UNSIGNED-PAYLOAD" \
             "$BASE_URL/health")
           echo "HTTP $CODE"
