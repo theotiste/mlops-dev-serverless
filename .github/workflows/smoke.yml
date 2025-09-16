@@ -68,13 +68,14 @@ jobs:
           echo "BASE_URL=${BASE_URL}" | tee -a "$GITHUB_ENV"
           echo "Target: ${BASE_URL}"
 
-      - name: Sanity: caller + curl features
+      - name: "Sanity: caller + curl features"
         shell: bash
         run: |
           aws sts get-caller-identity
           curl -V | sed -n '1p;/Features/p'
           curl --help all | grep -iq aws-sigv4 || { echo '::error::curl sans --aws-sigv4'; exit 1; }
-
+    
+     
       - name: Install awscurl (SigV4)
         shell: bash
         run: |
