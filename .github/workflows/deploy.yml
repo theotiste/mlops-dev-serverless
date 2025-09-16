@@ -69,6 +69,33 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+      
+
+      # Outils pip à jour (évite plein d’erreurs de build)
+      - name: Upgrade pip tools
+        run:
+          python -m pip install --upgrade pip setuptools wheel virtualenv
+
+      # Installation locale du plugin (v4 exige que le plugin soit en node_modules du projet)
+      - name: Install Serverless plugins (local devDeps)
+        run: |
+          set -euo pipefail
+          # Ne crée un package.json que s'il n'existe pas
+          if [ ! -f package.json ]; then
+           echo '{"name":"ci-workspace","private":true}' > package.json
+          fi
+          npm --version
+          npm config set fund false
+          npm config set audit false
+          npm i -D serverless-python-requirements@^6
+          # Sanity check : le plugin doit apparaître dans la liste
+          serverless plugin list || true
+          npm ls serverless-python-requirements
+
+          # (Optionnel) si ton serverless.yml n’a pas déjà le plugin :
+          # plugins:
+          #   - serverless-python-requirements
+    
 
       - name: Deploy (Serverless v4)
         env:
