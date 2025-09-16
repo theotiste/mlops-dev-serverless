@@ -12,7 +12,7 @@ on:
         default: "eu-west-3"
         required: true
       api_base_url:
-        description: "Optional base URL for smoke check (e.g. https://api.mlopstheotiste.fr)"
+        description: "Optional base URL for smoke check (ex: https://api.mlopstheotiste.fr)"
         required: false
   push:
     branches: ["main"]
@@ -38,80 +38,17 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
-
-      - name: Install Serverless (v4)
-        run: |
-          npm i -g serverless@4
-          serverless --version
-
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Serverless plugins (local devDeps)
-        run: |
-          set -euo pipefail
-          test -f package.json || npm init -y
-          npm i -D serverless-python-requirements@6    
-
-      - name: Configure AWS credentials (static keys)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      
-
-      # Outils pip à jour (évite plein d’erreurs de build)
-      - name: Upgrade pip tools
-        run:
-          python -m pip install --upgrade pip setuptools wheel virtualenv
-
-      # Installation locale du plugin (v4 exige que le plugin soit en node_modules du projet)
-      - name: Install Serverless plugins (local devDeps)
-        run: |
-          set -euo pipefail
-          # Ne crée un package.json que s'il n'existe pas
-          if [ ! -f package.json ]; then
-           echo '{"name":"ci-workspace","private":true}' > package.json
-          fi
-          npm --version
-          npm config set fund false
-          npm config set audit false
-          npm i -D serverless-python-requirements@^6
-          # Sanity check : le plugin doit apparaître dans la liste
-          serverless plugin list || true
-          npm ls serverless-python-requirements
-
-          # (Optionnel) si ton serverless.yml n’a pas déjà le plugin :
-          # plugins:
-          #   - serverless-python-requirements
-    
-
-      - name: Deploy (Serverless v4)
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}  # ← tu l’as déjà
-          SLS_ORG:  ${{ vars.SLS_ORG }}   # à définir dans Actions → Variables (ou remplace en dur)
-          SLS_APP:  ${{ vars.SLS_APP }}   # idem
-        run: |
-          set -euo pipefail
-          serverless deploy --stage "$STAGE" --region "$AWS_REGION" \
-          --org "$SLS_ORG" --app "$SLS_APP"
-          serverless info   --stage "$STAGE" --region "$AWS_REGION"
-    
-
-      - name: "/health check (optional)"
-        if: ${{ env.API_BASE_URL != '' }}
-        run: |
-          set -euo pipefail
-          curl -fsS -i --connect-timeout 10 --max-time $TIMEOUT_S "$API_BASE_URL/health" | tee /tmp/health.txt
-          grep -Eq '^HTTP/([
+      - nam
