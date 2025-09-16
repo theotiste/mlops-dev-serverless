@@ -18,7 +18,7 @@ on:
         description: "Domaine personnalisé (ex: api.mlopstheotiste.fr)"
         required: false
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   id-token: write
@@ -28,7 +28,6 @@ concurrency:
   group: smoke-${{ github.ref_name }}
   cancel-in-progress: true
 
-# Valeurs par défaut (surclassées par workflow_dispatch inputs ou repo → Actions → Variables)
 env:
   HEALTH_PATH: /health
   PREDICT_PATH: /predict
@@ -37,7 +36,10 @@ env:
   API_ID:     ${{ inputs.api_id     || vars.API_ID     || '' }}
   API_STAGE:  ${{ inputs.api_stage  || vars.API_STAGE  || 'dev' }}
   API_DOMAIN: ${{ inputs.api_domain || vars.API_DOMAIN || '' }}
-  OIDC_AUDIENCE: ${{ inputs.oidc_audience || vars.OIDC_AUDIENCE || 'sts.amazonaws.com' }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   smoke:
@@ -45,143 +47,83 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: "Debug OIDC claims"
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "repo=${GITHUB_REPOSITORY}"
-          echo "ref=${GITHUB_REF}"
-          curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=${OIDC_AUDIENCE}" \
-            -o oidc_resp.json
-          python3 -c 'import json,base64;resp=json.load(open("oidc_resp.json"));tok=resp["value"];p=tok.split(".")[1];p+="="*((4-len(p)%4)%4);print(json.dumps(json.loads(base64.urlsafe_b64decode(p)),indent=2))'
-
       - name: "Clear pre-set AWS creds"
         run: |
           unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_REGION
 
-      - name: "Ensure AWS CLI present"
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v aws >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y awscli
-          fi
-          aws --version
-
-      - name: "Manual STS AssumeRoleWithWebIdentity (debug)"
-        env:
-          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "${ROLE_ARN}" || { echo "::error::Missing AWS_ROLE_ARN secret"; exit 1; }
-          TOK=$(curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                 "${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=${OIDC_AUDIENCE}" | \
-                 python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])')
-          # IMPORTANT: aucune cred AWS pour cet appel
-          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_REGION
-          set +e
-          aws sts assume-role-with-web-identity \
-            --role-arn "${ROLE_ARN}" \
-            --role-session-name gha-debug \
-            --web-identity-token "${TOK}" \
-            --duration-seconds 900 \
-            --region "${AWS_REGION}" \
-            >/tmp/assume.json 2>/tmp/assume.err
-          RC=$?
-          set -e
-          if [ $RC -ne 0 ]; then
-            echo '--- STS error ---'
-            sed -n '1,200p' /tmp/assume.err || true
-            exit $RC
-          fi
-          echo '--- STS assume OK (truncated) ---'
-          head -c 200 /tmp/assume.json || true*
-
-      # 1) Step Debug OIDC claims – URL du jeton
-          curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-          "${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=sts.amazonaws.com" \
-          -o oidc_resp.json
-
-      # 2) Action configure-aws-credentials
       - name: "Configure AWS credentials (OIDC)"
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
-     
 
       - name: "Who am I?"
         run: |
           aws sts get-caller-identity
-          echo "KEY_PREFIX=${AWS_ACCESS_KEY_ID:0:4} (should be ASIA)"
+          echo "KEY_PREFIX=${AWS_ACCESS_KEY_ID:0:4}"  # doit afficher ASIA
 
-      - name: Resolve BASE_URL
+      - name: "Resolve BASE_URL"
         id: resolve
-        shell: bash
         run: |
           set -euo pipefail
           if [ -n "${API_DOMAIN}" ]; then
             BASE_URL="https://${API_DOMAIN}"
           else
             if [ -z "${API_ID}" ]; then
-              echo "::error::API_ID manquant. Définis-le via workflow_dispatch ou repo variable API_ID."; exit 1
+              echo "::error::API_ID manquant. Définis-le via workflow_dispatch ou repo variable API_ID."
+              exit 1
             fi
             BASE_URL="https://${API_ID}.execute-api.${AWS_REGION}.amazonaws.com/${API_STAGE}"
           fi
-          echo "BASE_URL=${BASE_URL}" | tee -a "$GITHUB_ENV"
+          echo "BASE_URL=${BASE_URL}" >> "$GITHUB_ENV"
           echo "Health:  ${BASE_URL}${HEALTH_PATH}"
           echo "Predict: ${BASE_URL}${PREDICT_PATH}"
 
-      - name: "Sanity: curl features"
-        shell: bash
+      - name: "Sanity: curl supports aws-sigv4"
         run: |
           set -euo pipefail
           curl -V | sed -n '1p;/Features/p'
           curl --help all | grep -iq aws-sigv4 || { echo '::error::curl sans --aws-sigv4'; exit 1; }
 
-      - name: Install awscurl (SigV4)
-        shell: bash
+      - name: "Install awscurl (SigV4)"
         run: |
           python3 -m pip install --user --upgrade awscurl
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Build payload (30 floats)
-        shell: bash
+      - name: "Build payload (30 floats)"
         run: |
           set -euo pipefail
           PAYLOAD="$GITHUB_WORKSPACE/payload.json"
-          cat <<EOF > "$PAYLOAD"
+          cat > "$PAYLOAD" <<'JSON'
           [17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,
            1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,
            25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189]
-          EOF
-          python3 -c 'import json,os; p=os.environ["PAYLOAD"]; a=json.load(open(p)); assert isinstance(a,list) and len(a)==30, "payload doit être une liste de 30 floats"; print(f"OK payload: {len(a)} features")'
+          JSON
+          python3 - "$PAYLOAD" <<'PY'
+import sys, json
+arr=json.load(open(sys.argv[1])); assert isinstance(arr,list) and len(arr)==30
+print(f"OK payload: {len(arr)} features")
+PY
           echo "PAYLOAD=$PAYLOAD" >> "$GITHUB_ENV"
 
       - name: "/health (public)"
-        shell: bash
         run: |
           set -euo pipefail
           curl -fsS -i --connect-timeout 10 --max-time $TIMEOUT_S \
-            "$BASE_URL${HEALTH_PATH}" | tee /tmp/health.txt
+            "$BASE_URL$HEALTH_PATH" | tee /tmp/health.txt
           grep -Eq '^HTTP/([0-9.]+) 200' /tmp/health.txt
 
       - name: "/predict (SigV4 via awscurl)"
-        shell: bash
         run: |
           set -euo pipefail
           awscurl --service execute-api --region "$AWS_REGION" \
             -X POST -H 'Content-Type: application/json' \
             --data "@${PAYLOAD}" \
-            "$BASE_URL${PREDICT_PATH}" | tee /tmp/predict_awscurl.json
+            "$BASE_URL$PREDICT_PATH" | tee /tmp/predict_awscurl.json
           test -s /tmp/predict_awscurl.json
 
       - name: "/predict (SigV4 via curl)"
-        shell: bash
         run: |
           set -euo pipefail
           curl -fsS -i --connect-timeout 10 --max-time $TIMEOUT_S \
@@ -189,20 +131,13 @@ jobs:
             -H "Content-Type: application/json" \
             -H "X-Amz-Content-Sha256: UNSIGNED-PAYLOAD" \
             ${AWS_SESSION_TOKEN:+-H "X-Amz-Security-Token: ${AWS_SESSION_TOKEN}"} \
-            --data-binary @"${PAYLOAD}" \
-            "$BASE_URL${PREDICT_PATH}" | tee /tmp/predict_curl.txt
+            --data-binary "@${PAYLOAD}" \
+            "$BASE_URL$PREDICT_PATH" | tee /tmp/predict_curl.txt
           grep -Eq '^HTTP/([0-9.]+) 200' /tmp/predict_curl.txt
 
-      - name: Summarize
+      - name: "Summarize"
         if: always()
-        shell: bash
         run: |
-          echo '--- HEALTH ---'
-          sed -n '1,8p' /tmp/health.txt || true
-          echo '
---- PREDICT (awscurl) ---'
-          head -c 400 /tmp/predict_awscurl.json || true
-          echo '
-
---- PREDICT (curl headers) ---'
-          sed -n '1,20p' /tmp/predict_curl.txt || true
+          echo '--- HEALTH ---'; sed -n '1,8p' /tmp/health.txt || true
+          echo '\n--- PREDICT (awscurl) ---'; head -c 400 /tmp/predict_awscurl.json || true
+          echo '\n\n--- PREDICT (curl headers) ---'; sed -n '1,20p' /tmp/predict_curl.txt || true
