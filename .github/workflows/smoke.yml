@@ -4,19 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       api_id:
-        description: "ID REST API Gateway (ex: elh9s0fhdk)"
-        required: true
+        description: "ID REST/API Gateway (ex: elh9s0fhdk)"
+        required: false
       api_stage:
         description: "Stage de l'API (ex: dev)"
         default: "dev"
-        required: true
+        required: false
       aws_region:
         description: "Région AWS (ex: eu-west-3)"
         default: "eu-west-3"
-        required: true
-      # Optionnel : domaine personnalisé pour l’API (sinon = execute-api.*)
+        required: false
       api_domain:
-        description: "Domaine personnalisé de l’API (ex: api.mlopstheotiste.fr)"
+        description: "Domaine personnalisé (ex: api.mlopstheotiste.fr)"
         required: false
   push:
     branches: [ "main" ]
@@ -29,15 +28,16 @@ concurrency:
   group: smoke-${{ github.ref_name }}
   cancel-in-progress: true
 
+# Valeurs par défaut (peuvent être surchargées par workflow_dispatch inputs ou repo → Actions → Variables)
 env:
-  AWS_REGION: eu-west-3
-  API_HOST: api.mlopstheotiste.fr      
   HEALTH_PATH: /health
   PREDICT_PATH: /predict
-
-
-# Prérequis: rôle IAM OIDC avec la trust policy GitHub et la policy execute-api:Invoke
-# + base path mapping sur api.mlopstheotiste.fr -> API elh9s0fhdk / stage dev
+  TIMEOUT_S: 20
+  # Fallbacks (utilisés si pas d'inputs):
+  AWS_REGION: ${{ github.event_name == 'workflow_dispatch' && inputs.aws_region || vars.AWS_REGION || 'eu-west-3' }}
+  API_ID:     ${{ github.event_name == 'workflow_dispatch' && inputs.api_id     || vars.API_ID     || '' }}
+  API_STAGE:  ${{ github.event_name == 'workflow_dispatch' && inputs.api_stage  || vars.API_STAGE  || 'dev' }}
+  API_DOMAIN: ${{ github.event_name == 'workflow_dispatch' && inputs.api_domain || vars.API_DOMAIN || '' }}
 
 jobs:
   smoke:
@@ -45,107 +45,92 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # OIDC -> crédentials temporaires dans env (AWS_* disponibles)
+      # Configure OIDC → creds temporaires exportés en variables d'env AWS_*
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::571600829584:role/GitHubOIDC-ServerlessDeployer
-          aws-region: eu-west-3
-          role-session-name: gha-17742289298
-          audience: sts.amazonaws.com
-          output-env-credentials: true
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve BASE_URL
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${API_DOMAIN}" ]; then
+            BASE_URL="https://${API_DOMAIN}"
+          else
+            if [ -z "${API_ID}" ]; then
+              echo "::error::API_ID manquant. Définir via dispatch input ou repo variable API_ID."; exit 1
+            fi
+            BASE_URL="https://${API_ID}.execute-api.${AWS_REGION}.amazonaws.com/${API_STAGE}"
+          fi
+          echo "BASE_URL=${BASE_URL}" | tee -a "$GITHUB_ENV"
+          echo "Target: ${BASE_URL}"
+
+      - name: Sanity: caller + curl features
+        shell: bash
+        run: |
+          aws sts get-caller-identity
+          curl -V | sed -n '1p;/Features/p'
+          curl --help all | grep -iq aws-sigv4 || { echo '::error::curl sans --aws-sigv4'; exit 1; }
 
       - name: Install awscurl (SigV4)
+        shell: bash
         run: |
-          python3 -m pip install --user --upgrade pip awscurl
+          python3 -m pip install --user --upgrade awscurl
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Build payload
+      - name: Build payload (30 floats)
+        shell: bash
         run: |
+          set -euo pipefail
           cat > /tmp/payload.json <<'JSON'
-          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
+          [17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,
+           1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,
+           25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189]
           JSON
+          jq . /tmp/payload.json >/dev/null
+          test "$(jq 'length' /tmp/payload.json)" -eq 30
 
       - name: /health (public)
+        shell: bash
         run: |
           set -euo pipefail
-          curl -sS -i "https://${{ env.API_HOST }}${{ env.HEALTH_PATH }}"
+          curl -fsS -i --connect-timeout 10 --max-time $TIMEOUT_S \
+            "$BASE_URL${HEALTH_PATH}" | tee /tmp/health.txt
+          grep -Eq '^HTTP/([0-9.]+) 200' /tmp/health.txt
 
-      - name: /predict (SigV4, IAM) with awscurl
+      - name: /predict (SigV4 via awscurl)
+        shell: bash
         run: |
           set -euo pipefail
-          # -v pour voir les headers (dont Authorization) si besoin
-          awscurl -v \
-            --region "${AWS_REGION}" \
-            --service execute-api \
-            -X POST \
-            -H 'Content-Type: application/json' \
+          awscurl --service execute-api --region "$AWS_REGION" \
+            -X POST -H 'Content-Type: application/json' \
             --data @/tmp/payload.json \
-            "https://${API_HOST}${PREDICT_PATH}"
-     
-      # Installe un curl QUI SAIT signer SigV4 et expose son chemin
-      - name: Install curl with SigV4
-        run: |
-          brew install curl
-          echo "CURL=$(brew --prefix)/opt/curl/bin/curl" >> $GITHUB_ENV
-          ${{ env.CURL }} -V | sed -n '1p;/Features/p'  # doit afficher 'aws-sigv4'
+            "$BASE_URL${PREDICT_PATH}" | tee /tmp/predict_awscurl.json
+          test -s /tmp/predict_awscurl.json
 
-      - name: Build payload
-        run: |
-          cat > /tmp/payload.json <<'JSON'
-          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
-          JSON
-          jq -C . /tmp/payload.json || true
-          
-      - name: /health (public)
+      - name: /predict (SigV4 via curl)
+        shell: bash
         run: |
           set -euo pipefail
-          curl -fsS -i "https://api.mlopstheotiste.fr/health" | tee /tmp/health.txt
-          grep -q 'HTTP/2 200' /tmp/health.txt
-
-      - name: /predict (SigV4, IAM)
-        env:
-          REGION: eu-west-3
-        run: |
-          set -euo pipefail
-          cat >/tmp/payload.json <<'JSON'
-          {"features":[14.5,20.1,95.5,700.0,0.10,0.11,0.08,0.05,0.18,0.060,0.50,1.10,3.50,40.0,0.006,0.020,0.025,0.010,0.020,0.003,16.5,22.1,110.0,900.0,0.13,0.18,0.20,0.12,0.28,0.08]}
-          JSON
-
-          # Signature SigV4 faite par curl (nécessite les creds OIDC configurés juste au-dessus)
-          curl -fsS -i \
-            --aws-sigv4 "aws:amz:${REGION}:execute-api" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/payload.json \
-            "https://api.mlopstheotiste.fr/predict" | tee /tmp/predict.txt
-
-          grep -q 'HTTP/2 200' /tmp/predict.txt
-    
-
-      - name: /health (public)
-        run: |
-          set -euo pipefail
-          ${{ env.CURL }} -sS -i "https://${{ env.API_HOST }}${{ env.HEALTH_PATH }}"
-
-      - name: /predict (SigV4, IAM)
-        run: |
-          set -euo pipefail
-
-          # Appel signé – on force le Host + on passe le token de session
-          ${{ env.CURL }} -sS -v \
+          curl -fsS -i --connect-timeout 10 --max-time $TIMEOUT_S \
             --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
-            -H "Host: ${API_HOST}" \
-            -H "Content-Type: application/json" \
-            -H "X-Amz-Security-Token: ${AWS_SESSION_TOKEN}" \
+            -H 'Content-Type: application/json' \
             --data-binary @/tmp/payload.json \
-            "https://${API_HOST}${PREDICT_PATH}" 2>&1 | tee /tmp/curl.out
+            "$BASE_URL${PREDICT_PATH}" | tee /tmp/predict_curl.txt
+          grep -Eq '^HTTP/([0-9.]+) 200' /tmp/predict_curl.txt
 
-          # Vérification défensive : l’en-tête Authorization doit être présent
-          if ! grep -qiE '^> Authorization: AWS4-HMAC-SHA256' /tmp/curl.out; then
-            echo "ERREUR: l'en-tête Authorization SigV4 n'a pas été envoyé." >&2
-            echo "curl utilisé : $({{ env.CURL }} -V | head -1)" >&2
-            exit 2
-          fi
-
-
-     
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          echo '--- HEALTH ---'
+          sed -n '1,8p' /tmp/health.txt || true
+          echo '
+--- PREDICT (awscurl) ---'
+          head -c 400 /tmp/predict_awscurl.json || true
+          echo '
+--- PREDICT (curl) ---'
+          sed -n '1,12p' /tmp/predict_curl.txt || true
