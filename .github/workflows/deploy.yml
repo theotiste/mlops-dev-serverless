@@ -1,92 +1,82 @@
-# .github/workflows/deploy.yaml
-name: Deploy API (Serverless)
+name: Deploy (Serverless + static AWS keys)
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "serverless.yml"
-      - "serverless.yaml"
-      - "handler.py"
-      - "requirements.txt"
-      - "package.json"
-      - "package-lock.json"
-      - "src/**"
-      - ".github/workflows/deploy.yaml"
   workflow_dispatch:
+    inputs:
+      stage:
+        description: "Serverless stage (dev|prod)"
+        default: "dev"
+        required: true
+      region:
+        description: "AWS region"
+        default: "eu-west-3"
+        required: true
+      api_base_url:
+        description: "Optional base URL for smoke check (e.g. https://api.mlopstheotiste.fr)"
+        required: false
+  push:
+    branches: ["main"]
 
 permissions:
-  id-token: write      # OIDC vers AWS
   contents: read
 
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: true
+
 env:
-  STAGE: dev
-  AWS_REGION: eu-west-3
-  # Evite la télémétrie et les prompts en CI
-  SLS_TELEMETRY_DISABLED: "1"
-  SLS_NOTIFICATION_MODE: error
-  # Access key Serverless v4 (Dashboard)
-  SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+  AWS_REGION: ${{ inputs.region || 'eu-west-3' }}
+  STAGE: ${{ inputs.stage || 'dev' }}
+  API_BASE_URL: ${{ inputs.api_base_url || vars.API_BASE_URL || '' }}
+  TIMEOUT_S: 20
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   deploy:
-    name: Deploy with Serverless
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Use Node.js 20
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: "npm"
+          node-version: '20'
 
-      - name: Use Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install Serverless Framework
+        run: npm i -g serverless
 
-      # --- Auth AWS via OIDC (recommandé) ---
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (static keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-          output-credentials: true
 
-      # --- Dépendances ---
-      - name: Install Node deps (for Serverless + plugins)
-        run: npm ci
-
-      # Si ton plugin serverless-python-requirements construit en local,
-      # Python/pip doivent être présents (déjà via setup-python).
-      # Tu n'as rien à installer ici pour le plugin : il vient de npm.
-
-      - name: Print versions
+      - name: serverless deploy
         run: |
-          node -v
-          python --version
-          npx serverless@4 --version
+          set -euo pipefail
+          serverless deploy --stage "$STAGE" --region "$AWS_REGION"
+          serverless info --stage "$STAGE" --region "$AWS_REGION"
 
-      # --- Déploiement ---
-      - name: Serverless deploy
+      - name: Optional /health check (public)
+        if: ${{ env.API_BASE_URL != '' }}
         run: |
-          npx serverless@4 deploy \
-            --stage "${STAGE}" \
-            --region "${AWS_REGION}" \
-            --conceal
-        env:
-          # Pour être explicite si tu veux overrider la région depuis les secrets
-          AWS_REGION: ${{ secrets.AWS_REGION || env.AWS_REGION }}
-          # (déjà injectée au niveau env global)
-          SERVERLESS_ACCESS_KEY: ${{ env.SERVERLESS_ACCESS_KEY }}
+          set -euo pipefail
+          curl -fsS -i --connect-timeout 10 --max-time $TIMEOUT_S \
+            "$API_BASE_URL/health" | tee /tmp/health.txt
+          grep -Eq '^HTTP/([0-9.]+) 200' /tmp/health.txt
 
-      # --- Infos post-déploiement (endpoints, layers, etc.) ---
-      - name: Serverless info
-        if: always()
+      - name: Optional /predict (SigV4) using static keys
+        if: ${{ env.API_BASE_URL != '' }}
         run: |
-          npx serverless@4 info \
-            --stage "${STAGE}" \
-            --region "${AWS_REGION}" || true
+          set -euo pipefail
+          echo '[17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189]' > payload.json
+          curl -fsS -i \
+            --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json \
+            "$API_BASE_URL/predict" | tee /tmp/predict.txt
+          grep -Eq '^HTTP/([0-9.]+) 200' /tmp/predict.txt
