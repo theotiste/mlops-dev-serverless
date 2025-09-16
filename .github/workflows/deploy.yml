@@ -45,7 +45,7 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Serverless Framework (pin v3 – no login needed)
+      - name: - name: Install Serverless Framework (pin v3)
         run: |
           npm i -g serverless@3
           serverless --version
