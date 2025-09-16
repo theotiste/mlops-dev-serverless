@@ -44,34 +44,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Debug: affiche les claims du jeton OIDC émis par GitHub (utile pour caler la trust policy)
       - name: "Debug OIDC claims"
         shell: bash
         run: |
           set -euo pipefail
           echo "repo=${GITHUB_REPOSITORY}"
           echo "ref=${GITHUB_REF}"
-          RESP=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          RESP=$(curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                  "${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=sts.amazonaws.com")
+          # extraire le jeton OIDC sans jq complexe
           TOK=$(python3 - <<'PY'
 import sys, json
 print(json.load(sys.stdin)["value"])
 PY
 <<<"$RESP")
-          python3 - <<'PY' <<<"$TOK"
-import sys, base64, json
-jwt=sys.stdin.read().strip()
-payload=jwt.split('.')[1]
-payload+= '='*((4-len(payload)%4)%4)
+          export TOK
+          python3 - <<'PY'
+import os,base64,json
+tok=os.environ["TOK"]
+payload=tok.split('.')[1]
+payload += '='*((4-len(payload)%4)%4)
 print(json.dumps(json.loads(base64.urlsafe_b64decode(payload)), indent=2))
 PY
 
-      # Purge d'éventuelles clés AKIA héritées pour forcer l'usage du rôle OIDC
       - name: "Clear pre-set AWS creds"
         run: |
           unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_REGION
 
-      # OIDC → crédentials temporaires (ASIA*) exportés via variables d'env AWS_*
       - name: "Configure AWS credentials (OIDC)"
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -123,7 +122,7 @@ PY
            1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,
            25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189]
           JSON
-          python3 - <<'PY' "$PAYLOAD"
+          python3 - "$PAYLOAD" <<'PY'
 import sys, json
 arr=json.load(open(sys.argv[1]))
 assert isinstance(arr, list) and len(arr)==30, "payload doit être une liste de 30 floats"
@@ -168,7 +167,10 @@ PY
         run: |
           echo '--- HEALTH ---'
           sed -n '1,8p' /tmp/health.txt || true
-          echo '\n--- PREDICT (awscurl) ---'
+          echo '
+--- PREDICT (awscurl) ---'
           head -c 400 /tmp/predict_awscurl.json || true
-          echo '\n\n--- PREDICT (curl headers) ---'
+          echo '
+
+--- PREDICT (curl headers) ---'
           sed -n '1,20p' /tmp/predict_curl.txt || true
