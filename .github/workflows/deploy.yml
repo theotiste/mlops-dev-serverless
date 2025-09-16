@@ -55,14 +55,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel virtualenv
 
-      - name: Install project dependencies (includes plugins)
+      # Installe les deps du projet si package.json est VALIDE, sinon installe juste le plugin localement
+      - name: Install project dependencies (robust)
         run: |
           set -euo pipefail
-          if [ -f package-lock.json ]; then
-            npm ci
+          echo "Validating package.json..."
+          if [ -f package.json ] && jq . package.json >/dev/null 2>&1; then
+            echo "package.json is valid -> installing project deps"
+            if [ -f package-lock.json ]; then npm ci; else npm i; fi
           else
+            echo "package.json missing or invalid -> using CI shim to install plugin"
+            if [ -f package.json ]; then mv -f package.json package.json.repo; fi
+            printf '{"name":"ci-workspace","private":true,"devDependencies":{"serverless-python-requirements":"^6.0.0"}}\n' > package.json
+            npm config set fund false
+            npm config set audit false
             npm i
+            if [ -f package.json.repo ]; then mv -f package.json.repo package.json; fi
           fi
+          echo "Plugins visible:"
           npx serverless plugin list || true
           npm ls serverless-python-requirements || true
 
