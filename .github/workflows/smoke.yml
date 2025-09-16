@@ -59,6 +59,45 @@ jobs:
         run: |
           unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_REGION
 
+      - name: "Ensure AWS CLI present"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y awscli
+          fi
+          aws --version
+
+      - name: "Manual STS AssumeRoleWithWebIdentity (debug)"
+        env:
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ROLE_ARN}" || { echo "::error::Missing AWS_ROLE_ARN secret"; exit 1; }
+          TOK=$(curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                 "${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=sts.amazonaws.com" | \
+                 python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])')
+          # IMPORTANT: aucune cred AWS pour cet appel
+          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_REGION
+          set +e
+          aws sts assume-role-with-web-identity \
+            --role-arn "${ROLE_ARN}" \
+            --role-session-name gha-debug \
+            --web-identity-token "${TOK}" \
+            --duration-seconds 900 \
+            >/tmp/assume.json 2>/tmp/assume.err
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            echo '--- STS error ---'
+            sed -n '1,200p' /tmp/assume.err || true
+            exit $RC
+          fi
+          echo '--- STS assume OK (truncated) ---'
+          head -c 200 /tmp/assume.json || true
+
       - name: "Configure AWS credentials (OIDC)"
         uses: aws-actions/configure-aws-credentials@v4
         with:
