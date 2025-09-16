@@ -51,6 +51,18 @@ jobs:
           npm i -g serverless@4
           serverless --version
 
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Serverless plugins (local devDeps)
+        run: |
+          set -euo pipefail
+          test -f package.json || npm init -y
+          npm i -D serverless-python-requirements@6    
+
       - name: Configure AWS credentials (static keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
