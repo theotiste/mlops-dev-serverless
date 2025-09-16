@@ -1,4 +1,4 @@
-name: Deploy (Serverless v3 + static keys)
+name: Deploy (Serverless v4 + static keys)
 
 on:
   workflow_dispatch:
@@ -45,9 +45,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Serverless Framework (v3)
+
+      - name: Install Serverless (v4)
         run: |
-          npm i -g serverless@3
+          npm i -g serverless@4
           serverless --version
 
       - name: Configure AWS credentials (static keys)
@@ -57,11 +58,17 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy
+      - name: Deploy (Serverless v4)
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}  # ← tu l’as déjà
+          SLS_ORG:  ${{ vars.SLS_ORG }}   # à définir dans Actions → Variables (ou remplace en dur)
+          SLS_APP:  ${{ vars.SLS_APP }}   # idem
         run: |
           set -euo pipefail
-          serverless deploy --stage "$STAGE" --region "$AWS_REGION"
-          serverless info --stage "$STAGE" --region "$AWS_REGION"
+          serverless deploy --stage "$STAGE" --region "$AWS_REGION" \
+          --org "$SLS_ORG" --app "$SLS_APP"
+          serverless info   --stage "$STAGE" --region "$AWS_REGION"
+    
 
       - name: "/health check (optional)"
         if: ${{ env.API_BASE_URL != '' }}
