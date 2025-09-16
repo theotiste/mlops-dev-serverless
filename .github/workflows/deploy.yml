@@ -45,8 +45,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Serverless Framework
-        run: npm i -g serverless
+      - name: Install Serverless Framework (pin v3 – no login needed)
+        run: |
+          npm i -g serverless@3
+          serverless --version
 
       - name: Configure AWS credentials (static keys)
         uses: aws-actions/configure-aws-credentials@v4
@@ -55,10 +57,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: serverless deploy
-        run: |
-          set -euo pipefail
-          serverless deploy --stage "$STAGE" --region "$AWS_REGION"
+      - name: serverless deploy --stage "$STAGE" --region "$AWS_REGION"
           serverless info --stage "$STAGE" --region "$AWS_REGION"
 
       - name: Optional /health check (public)
