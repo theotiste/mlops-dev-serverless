@@ -44,13 +44,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clear any pre-set AWS creds
+        run: |
+          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_REGION AWS_REGION
 
-      # Configure OIDC → creds temporaires exportés en variables d'env AWS_*
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: eu-west-3
+
+      - name: Sanity – who am I?
+        run: |
+          aws sts get-caller-identity
+          echo "KEY=${AWS_ACCESS_KEY_ID}"
+ 
 
       - name: Resolve BASE_URL
         id: resolve
