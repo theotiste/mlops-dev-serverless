@@ -3,14 +3,8 @@ name: Deploy (Serverless v4 + static keys)
 on:
   workflow_dispatch:
     inputs:
-      stage:
-        description: "Serverless stage (dev|prod)"
-        default: "dev"
-        required: true
-      region:
-        description: "AWS region"
-        default: "eu-west-3"
-        required: true
+      stage:  { description: "dev|prod", default: "dev", required: true }
+      region: { description: "AWS region", default: "eu-west-3", required: true }
       api_base_url:
         description: "Optional base URL for smoke check (ex: https://api.mlopstheotiste.fr)"
         required: false
@@ -31,7 +25,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -52,49 +45,32 @@ jobs:
           python-version: "3.11"
 
       - name: Upgrade pip tools
-        run: |
-          python -m pip install --upgrade pip setuptools wheel virtualenv
+        run: python -m pip install --upgrade pip setuptools wheel virtualenv
 
-      # Installe les deps du projet si package.json est VALIDE, sinon installe juste le plugin localement
-      - name: Install project dependencies (robust)
+      - name: Install project dependencies
         run: |
-          set -euo pipefail
-          echo "Validating package.json..."
-          if [ -f package.json ] && jq . package.json >/dev/null 2>&1; then
-            echo "package.json is valid -> installing project deps"
-            if [ -f package-lock.json ]; then npm ci; else npm i; fi
-          else
-            echo "package.json missing or invalid -> using CI shim to install plugin"
-            if [ -f package.json ]; then mv -f package.json package.json.repo; fi
-            printf '{"name":"ci-workspace","private":true,"devDependencies":{"serverless-python-requirements":"^6.0.0"}}\n' > package.json
-            npm config set fund false
-            npm config set audit false
-            npm i
-            if [ -f package.json.repo ]; then mv -f package.json.repo package.json; fi
-          fi
-          echo "Plugins visible:"
+          if [ -f package-lock.json ]; then npm ci; else npm i; fi
           npx serverless plugin list || true
-          npm ls serverless-python-requirements || true
 
       - name: Configure AWS credentials (static keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ inputs.region || 'eu-west-3' }}
+          aws-region:            ${{ inputs.region || 'eu-west-3' }}
 
       - name: Deploy (Serverless v4)
         env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }} # requis en v4
-          SLS_ORG:  ${{ vars.SLS_ORG }}   # facultatif si déjà dans serverless.yml
-          SLS_APP:  ${{ vars.SLS_APP }}   # facultatif si déjà dans serverless.yml
-          STAGE:    ${{ inputs.stage || 'dev' }}
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          STAGE:      ${{ inputs.stage  || 'dev' }}
           AWS_REGION: ${{ inputs.region || 'eu-west-3' }}
+          SLS_ORG:    ${{ vars.SLS_ORG }}   # facultatif si déjà dans serverless.yml
+          SLS_APP:    ${{ vars.SLS_APP }}   # idem
         run: |
           set -euo pipefail
           EXTRA=""
-          if [ -n "${SLS_ORG:-}" ]; then EXTRA="$EXTRA --org ${SLS_ORG}"; fi
-          if [ -n "${SLS_APP:-}" ]; then EXTRA="$EXTRA --app ${SLS_APP}"; fi
+          [ -n "${SLS_ORG:-}" ] && EXTRA="$EXTRA --org ${SLS_ORG}"
+          [ -n "${SLS_APP:-}" ] && EXTRA="$EXTRA --app ${SLS_APP}"
           serverless deploy --stage "$STAGE" --region "$AWS_REGION" $EXTRA
           serverless info   --stage "$STAGE" --region "$AWS_REGION" $EXTRA
 
@@ -102,24 +78,18 @@ jobs:
         if: ${{ inputs.api_base_url != '' }}
         env:
           API_BASE_URL: ${{ inputs.api_base_url }}
-          TIMEOUT_S: 20
         run: |
-          set -euo pipefail
-          curl -fsS -i --connect-timeout 10 --max-time $TIMEOUT_S \
-            "$API_BASE_URL/health" | tee /tmp/health.txt
+          curl -fsS -i --connect-timeout 10 --max-time 20 "$API_BASE_URL/health" | tee /tmp/health.txt
           grep -Eq '^HTTP/([0-9.]+) 200' /tmp/health.txt
 
       - name: /predict (optional, SigV4)
         if: ${{ inputs.api_base_url != '' }}
         env:
           API_BASE_URL: ${{ inputs.api_base_url }}
-          AWS_REGION: ${{ inputs.region || 'eu-west-3' }}
+          AWS_REGION:   ${{ inputs.region || 'eu-west-3' }}
         run: |
-          set -euo pipefail
           echo '[17.99,10.38,122.8,1001.0,0.1184,0.2776,0.3001,0.1471,0.2419,0.07871,1.095,0.9053,8.589,153.4,0.006399,0.04904,0.05373,0.01587,0.03003,0.006193,25.38,17.33,184.6,2019.0,0.1622,0.6656,0.7119,0.2654,0.4601,0.1189]' > payload.json
-          curl -fsS -i \
-            --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
-            -H "Content-Type: application/json" \
-            --data-binary @payload.json \
-            "$API_BASE_URL/predict" | tee /tmp/predict.txt
+          curl -fsS -i --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" \
+               -H "Content-Type: application/json" \
+               --data-binary @payload.json "$API_BASE_URL/predict" | tee /tmp/predict.txt
           grep -Eq '^HTTP/([0-9.]+) 200' /tmp/predict.txt
