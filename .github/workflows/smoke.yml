@@ -98,14 +98,21 @@ jobs:
             exit $RC
           fi
           echo '--- STS assume OK (truncated) ---'
-          head -c 200 /tmp/assume.json || true
+          head -c 200 /tmp/assume.json || true*
 
+      # 1) Step Debug OIDC claims – URL du jeton
+          curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=sts.amazonaws.com" \
+          -o oidc_resp.json
+
+      # 2) Action configure-aws-credentials
       - name: "Configure AWS credentials (OIDC)"
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          audience: ${{ env.OIDC_AUDIENCE }}
+          audience: sts.amazonaws.com
+     
 
       - name: "Who am I?"
         run: |
