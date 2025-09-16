@@ -88,6 +88,13 @@ jobs:
         run: |
           set -euo pipefail
           curl -sS -i "https://${{ env.API_HOST }}${{ env.HEALTH_PATH }}"
+
+      - name: Install awscurl
+        run: |
+          python3 -m pip install --upgrade --user awscurl
+          echo "$HOME/.local/bin" >> $GITHUB_PATH    
+
+          
       - name: /predict (SigV4, IAM) with awscurl
         run: |
           set -euo pipefail
