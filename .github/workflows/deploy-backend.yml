@@ -94,13 +94,13 @@ jobs:
       # --- fin de job ---
 
       - name: Slack · success
-        if: ${{ success() && secrets.SLACK_WEBHOOK_URL == 'https://hooks.slack.com/services/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' }}
+        if: ${{ success() && secrets.SLACK_WEBHOOK_URL != ' ' }}
         run: |
           payload=$(jq -n --arg t ":white_check_mark: $GITHUB_WORKFLOW OK (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" '{text:$t}')
           curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
 
       - name: Slack · failure
-        if: ${{ failure() && secrets.SLACK_WEBHOOK_URL == 'https://hooks.slack.com/services/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' }}
+        if: ${{ failure() && secrets.SLACK_WEBHOOK_URL != ' ' }}
         run: |
           payload=$(jq -n --arg t ":x: $GITHUB_WORKFLOW FAILED (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" '{text:$t}')
           curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
