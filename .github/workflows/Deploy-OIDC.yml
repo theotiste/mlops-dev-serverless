@@ -52,9 +52,7 @@ jobs:
           npx serverless plugin list || true
 
       - name: Debug OIDC claims
-         permissions:
-          id-token: write
-          contents: read
+       
         run: |
           set -euo pipefail
           URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com"
