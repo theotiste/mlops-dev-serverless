@@ -3,22 +3,21 @@ name: Backend · Serverless v4 (static keys)
 on:
   workflow_dispatch:
     inputs:
-      stage:  { description: "dev|prod", default: "dev", required: true }
-      region: { description: "AWS region",  default: "eu-west-3", required: true }
+      region:
+        description: "AWS region"
+        default: eu-west-3
+        required: true
   push:
-    branches: [ "main" ]
+    branches: [ main ]
     paths:
       - "serverless.yml"
       - "serverless.yaml"
       - "handler.py"
-      - "requirements.txt"
+      - "functions/**"
       - "model-layer/**"
-      - "schemas/**"
+      - "requirements.txt"
       - "scripts/**"
-      - "**/*.py"
-      - "package.json"
-      - "package-lock.json"
-      - "!ui/**"
+      - "!ui/**"           # ignore le frontend
 
 permissions:
   contents: read
@@ -28,40 +27,33 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # si inputs non fournis, on retombe sur tes secrets existants
-  AWS_REGION: ${{ inputs.region || secrets.AWS_REGION }}
-  STAGE:      ${{ inputs.stage  || 'dev' }}
+  AWS_REGION: ${{ github.event.inputs.region || secrets.AWS_REGION }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}  
-   
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node.js
+      - name: Use Node.js (for Serverless)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
-      - name: Install Serverless (v4)
-        run: |
-          npm i -g serverless@4
-          serverless --version
-
-      - name: Setup Python
+      - name: Setup Python (build deps)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install project deps
+      - name: Install Serverless v4
+        run: npm i -g serverless@^4
+
+      - name: Install project dependencies (plugins, etc.)
         run: |
-          if [ -f package-lock.json ]; then npm ci; else npm i; fi
-          python -m pip install --upgrade pip wheel setuptools
+          if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm i; fi
 
       - name: Configure AWS (static keys)
         uses: aws-actions/configure-aws-credentials@v4
@@ -70,46 +62,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      - name: Deploy
-        env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }} 
+      - name: Deploy (Serverless v4)
         run: |
           set -euo pipefail
-          serverless deploy --stage "$STAGE" --region "$AWS_REGION"
-          serverless info   --stage "$STAGE" --region "$AWS_REGION"
+          serverless deploy --stage "${{ secrets.API_STAGE || 'dev' }}" --region "${AWS_REGION}"
 
       - name: Slack · notify
         if: ${{ always() }}
         env:
           STATUS: ${{ job.status }}
         run: |
-          # Si pas de webhook, on sort proprement
           if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
             echo "No SLACK_WEBHOOK_URL, skipping Slack notification."
             exit 0
           fi
-          icon=":white_check_mark:"
-          [ "$STATUS" = "success" ] || icon=":x:"
-          msg="$icon $GITHUB_WORKFLOW $STATUS (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME"
+          icon=":white_check_mark:"; [ "$STATUS" = "success" ] || icon=":x:"
+          msg="$icon Backend $STATUS (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME"
           curl -sS -X POST -H 'Content-type: application/json' \
                --data "{\"text\":\"${msg}\"}" \
-               "$SLACK_WEBHOOK_URL"    
-
-      - name: Health check (optionnel)
-        env:
-          HEALTH_URL:  ${{ secrets.HEALTH_URL }}
-          HEALTH_AUTH: ${{ secrets.HEALTH_AUTH }}
-        run: |
-          set -euo pipefail
-          if [ -n "${HEALTH_URL:-}" ]; then
-            if [ -n "${HEALTH_AUTH:-}" ]; then
-              curl -fsS -H "Authorization: ${HEALTH_AUTH}" "$HEALTH_URL" | tee /tmp/health.txt || true
-            else
-              curl -fsS "$HEALTH_URL" | tee /tmp/health.txt || true
-            fi
-          fi
-
-      # --- fin de job ---
-
-  
-     
+               "$SLACK_WEBHOOK_URL"
