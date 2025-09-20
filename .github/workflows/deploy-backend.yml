@@ -35,6 +35,8 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,7 +71,6 @@ jobs:
 
       - name: Deploy
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }} # si tu utilises le Dashboard v4
         run: |
           set -euo pipefail
@@ -90,6 +91,8 @@ jobs:
             fi
           fi
 
+      # --- fin de job ---
+
       - name: Slack · success
         if: ${{ success() && env.SLACK_WEBHOOK_URL != '' }}
         run: |
@@ -101,7 +104,6 @@ jobs:
         run: |
           payload=$(jq -n --arg t ":x: $GITHUB_WORKFLOW FAILED (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" '{text:$t}')
           curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
-     
+    
 
      
-    
