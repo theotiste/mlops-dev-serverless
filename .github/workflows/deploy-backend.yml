@@ -88,3 +88,18 @@ jobs:
               curl -fsS "$HEALTH_URL" | tee /tmp/health.txt || true
             fi
           fi
+
+      - name: Slack · success
+        if: ${{ success() && secrets.SLACK_WEBHOOK_URL != '' }}
+        run: |
+          jq -n --arg t ":white_check_mark: $GITHUB_WORKFLOW OK (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" \
+           '{text:$t}' | curl -sS -X POST -H 'Content-type: application/json' \
+           --data @- "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+      - name: Slack · failure
+        if: ${{ failure() && secrets.SLACK_WEBHOOK_URL != '' }}
+        run: |
+          jq -n --arg t ":x: $GITHUB_WORKFLOW FAILED (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" \
+           '{text:$t}' | curl -sS -X POST -H 'Content-type: application/json' \
+           --data @- "${{ secrets.SLACK_WEBHOOK_URL }}"
+    
