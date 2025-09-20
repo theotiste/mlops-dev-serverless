@@ -36,7 +36,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}     
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}  
+   
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,11 +72,28 @@ jobs:
 
       - name: Deploy
         env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }} # si tu utilises le Dashboard v4
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }} 
         run: |
           set -euo pipefail
           serverless deploy --stage "$STAGE" --region "$AWS_REGION"
           serverless info   --stage "$STAGE" --region "$AWS_REGION"
+
+      - name: Slack · notify
+        if: ${{ always() }}
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          # Si pas de webhook, on sort proprement
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "No SLACK_WEBHOOK_URL, skipping Slack notification."
+            exit 0
+          fi
+          icon=":white_check_mark:"
+          [ "$STATUS" = "success" ] || icon=":x:"
+          msg="$icon $GITHUB_WORKFLOW $STATUS (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME"
+          curl -sS -X POST -H 'Content-type: application/json' \
+               --data "{\"text\":\"${msg}\"}" \
+               "$SLACK_WEBHOOK_URL"    
 
       - name: Health check (optionnel)
         env:
