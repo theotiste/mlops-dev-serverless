@@ -26,6 +26,8 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,3 +87,28 @@ jobs:
           else
             echo "CF_DISTR_ID vide → pas d'invalidation."
           fi
+
+      - name: Slack · notify
+        if: ${{ always() }}
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          # Si pas de webhook, on sort proprement
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "No SLACK_WEBHOOK_URL, skipping Slack notification."
+            exit 0
+          fi
+          icon=":white_check_mark:"
+          [ "$STATUS" = "success" ] || icon=":x:"
+          msg="$icon $GITHUB_WORKFLOW $STATUS (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME"
+          curl -sS -X POST -H 'Content-type: application/json' \
+               --data "{\"text\":\"${msg}\"}" \
+               "$SLACK_WEBHOOK_URL"
+
+
+
+
+
+
+
+          
