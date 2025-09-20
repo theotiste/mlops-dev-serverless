@@ -1,4 +1,4 @@
-name: Deploy (Serverless v4 + OIDC)
+name: Deploy-oidc (Serverless v4 + OIDC)
 
 on:
   workflow_dispatch:
