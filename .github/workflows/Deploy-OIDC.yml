@@ -19,6 +19,10 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # Fallbacks valables pour push/dispatch
+      AWS_REGION: ${{ inputs.region || vars.AWS_REGION || 'eu-west-3' }}
+      STAGE:      ${{ inputs.stage  || vars.STAGE      || 'dev' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,16 +55,14 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # arn:aws:iam::XXXX:role/...
-          aws-region:      ${{ inputs.region }}
+          aws-region:     ${{ env.AWS_REGION }}         # <-- Fallback appliqué ici
           audience: sts.amazonaws.com
 
       - name: Deploy
         env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}  # v4 Dashboard
-          STAGE:      ${{ inputs.stage }}
-          AWS_REGION: ${{ inputs.region }}
-          SLS_ORG:    ${{ vars.SLS_ORG }}    # optionnel si défini dans serverless.yml
-          SLS_APP:    ${{ vars.SLS_APP }}    # optionnel
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          SLS_ORG: ${{ vars.SLS_ORG }}   # optionnel si défini dans serverless.yml
+          SLS_APP: ${{ vars.SLS_APP }}   # optionnel
         run: |
           set -euo pipefail
           EXTRA=""
