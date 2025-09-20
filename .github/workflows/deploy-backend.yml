@@ -91,16 +91,17 @@ jobs:
           fi
 
       - name: Slack · success
-        if: ${{ success() && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ success() && env.SLACK_WEBHOOK_URL != '' }}
         run: |
-          jq -n --arg t ":white_check_mark: $GITHUB_WORKFLOW OK (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" \
-           '{text:$t}' | curl -sS -X POST -H 'Content-type: application/json' \
-           --data @- "${{ secrets.SLACK_WEBHOOK_URL }}"
+          payload=$(jq -n --arg t ":white_check_mark: $GITHUB_WORKFLOW OK (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" '{text:$t}')
+          curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
 
       - name: Slack · failure
-        if: ${{ failure() && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ failure() && env.SLACK_WEBHOOK_URL != '' }}
         run: |
-          jq -n --arg t ":x: $GITHUB_WORKFLOW FAILED (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" \
-           '{text:$t}' | curl -sS -X POST -H 'Content-type: application/json' \
-           --data @- "${{ secrets.SLACK_WEBHOOK_URL }}"
+          payload=$(jq -n --arg t ":x: $GITHUB_WORKFLOW FAILED (#$GITHUB_RUN_NUMBER) – $GITHUB_REF_NAME" '{text:$t}')
+          curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+     
+
+     
     
