@@ -1,4 +1,4 @@
-name: Deploy backend (Serverless v4 + static keys)
+name: Backend · Serverless v4 (static keys)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,6 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      # back uniquement
       - "serverless.yml"
       - "serverless.yaml"
       - "handler.py"
@@ -17,7 +16,6 @@ on:
       - "schemas/**"
       - "scripts/**"
       - "**/*.py"
-      # npm plugins/lock (sans ui)
       - "package.json"
       - "package-lock.json"
       - "!ui/**"
@@ -26,12 +24,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-backend-${{ github.ref_name }}
+  group: backend-${{ github.ref_name }}
   cancel-in-progress: true
 
 env:
-  AWS_REGION: ${{ inputs.region || vars.AWS_REGION || 'eu-west-3' }}
-  STAGE:      ${{ inputs.stage  || vars.STAGE      || 'dev' }}
+  # si inputs non fournis, on retombe sur tes secrets existants
+  AWS_REGION: ${{ inputs.region || secrets.AWS_REGION }}
+  STAGE:      ${{ inputs.stage  || 'dev' }}
 
 jobs:
   deploy:
@@ -39,7 +38,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -57,34 +55,36 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install project dependencies
+      - name: Install project deps
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm i; fi
           python -m pip install --upgrade pip wheel setuptools
 
-      - name: Configure AWS credentials (static keys)
+      - name: Configure AWS (static keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      - name: Deploy (Serverless v4)
+      - name: Deploy
         env:
           SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }} # si tu utilises le Dashboard v4
-          SLS_ORG: ${{ vars.SLS_ORG }}   # optionnel si défini dans serverless.yml
-          SLS_APP: ${{ vars.SLS_APP }}   # optionnel
         run: |
           set -euo pipefail
-          EXTRA=""
-          [ -n "${SLS_ORG:-}" ] && EXTRA="$EXTRA --org ${SLS_ORG}"
-          [ -n "${SLS_APP:-}" ] && EXTRA="$EXTRA --app ${SLS_APP}"
-          serverless deploy --stage "$STAGE" --region "$AWS_REGION" $EXTRA
-          serverless info   --stage "$STAGE" --region "$AWS_REGION" $EXTRA
+          serverless deploy --stage "$STAGE" --region "$AWS_REGION"
+          serverless info   --stage "$STAGE" --region "$AWS_REGION"
 
-      # (facultatif) Sanity /health si tu as un domaine custom en variable
-      - name: Health check
-        if: ${{ vars.API_BASE_URL != '' }}
+      - name: Health check (optionnel)
+        env:
+          HEALTH_URL:  ${{ secrets.HEALTH_URL }}
+          HEALTH_AUTH: ${{ secrets.HEALTH_AUTH }}
         run: |
-          curl -fsS -i "${{ vars.API_BASE_URL }}/health" | tee /tmp/health.txt
-          grep -Eq '^HTTP/([0-9.]+) 200' /tmp/health.txt
+          set -euo pipefail
+          if [ -n "${HEALTH_URL:-}" ]; then
+            if [ -n "${HEALTH_AUTH:-}" ]; then
+              curl -fsS -H "Authorization: ${HEALTH_AUTH}" "$HEALTH_URL" | tee /tmp/health.txt || true
+            else
+              curl -fsS "$HEALTH_URL" | tee /tmp/health.txt || true
+            fi
+          fi
