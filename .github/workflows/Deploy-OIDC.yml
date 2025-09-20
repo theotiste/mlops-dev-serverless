@@ -52,7 +52,7 @@ jobs:
           npx serverless plugin list || true
 
       - name: Debug OIDC claims
-        permissions:
+         permissions:
           id-token: write
           contents: read
         run: |
