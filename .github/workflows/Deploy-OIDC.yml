@@ -51,6 +51,19 @@ jobs:
           if [ -f package-lock.json ]; then npm ci; else npm i; fi
           npx serverless plugin list || true
 
+      - name: Debug OIDC claims
+        permissions:
+          id-token: write
+          contents: read
+        run: |
+          set -euo pipefail
+          URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com"
+          TOK=$(curl -s -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "$URL" | jq -r .value)
+          IFS='.' read -r h p s <<<"$TOK"
+          echo "---- OIDC payload ----"
+          echo "$p" | base64 -d 2>/dev/null | jq -C .
+    
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
