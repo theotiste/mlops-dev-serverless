@@ -1,157 +1,79 @@
-service: cancer-prediction-api
-frameworkVersion: '4'
-configValidationMode: error
+service: cancer-prediction-api-dev
+
+frameworkVersion: "4"   # vous êtes sur SLS v4.x
 
 provider:
   name: aws
   runtime: python3.12
-  region: ${opt:region, 'eu-west-3'}
-  stage: ${opt:stage, 'dev'}
-  architecture: x86_64
-  memorySize: 512
+  region: eu-west-3
+  stage: dev
+  memorySize: 2048
   timeout: 28
-
-  # ✅ v4 : retention pour les log groups Lambda
-  logRetentionInDays: 14
-
-  # Logs API Gateway (facultatif)
-  logs:
-    restApi: true
-
+  architecture: x86_64
+  # On fige les variables d'env utilisées par le handler
   environment:
-    APP_STAGE: ${self:provider.stage}   # ne pas utiliser de variables AWS_*
+    S3_BUCKET: mlopstheotiste-bucket
+    S3_KEY: models/RandomForest.pkl
+    # Permet de forcer un refresh du modèle si besoin (changez la valeur)
+    MODEL_CACHE_BUSTER: "1758630221"
 
-plugins:
-  - serverless-python-requirements
-  - serverless-prune-plugin
+  # Permissions minimales pour lire le modèle dans S3
+  iam:
+    role:
+      statements:
+        - Sid: ListModelsPrefix
+          Effect: Allow
+          Action:
+            - s3:ListBucket
+          Resource: arn:aws:s3:::mlopstheotiste-bucket
+          Condition:
+            StringLike:
+              s3:prefix: "models/*"
+        - Sid: ReadModelObjects
+          Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:GetObjectAttributes
+            - s3:HeadObject
+          Resource: arn:aws:s3:::mlopstheotiste-bucket/models/*
 
-custom:
-  allowedOrigins:
-    - https://form.mlopstheotiste.fr
-    - https://dbc4cwxk7wl7p.cloudfront.net
+  # On fige le layer créé (sklearn + numpy)
+  layers:
+    - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-numpy-py312:1
 
-  pythonRequirements:
-    layer: true
-    slim: true
-    strip: true
-    zip: true
-    dockerizePip: true
-    useStaticCache: true
-    useDownloadCache: true
-    invalidateCaches: true
-    noDeploy:
-      - boto3
-      - botocore
-      - s3transfer
-      - setuptools
-      - pip
-      - wheel
-      - jmespath
-      - urllib3
-      - python-dateutil
-      - certifi
-      - idna
-      - chardet
-      - docutils
-
-  prune:
-    automatic: true
-    number: 3
+  httpApi:
+    cors:
+      allowedOrigins:
+        - "*" # ou remplacez par https://form.mlopstheotiste.fr
+      allowedHeaders:
+        - Content-Type
+      allowedMethods:
+        - POST
+        - GET
 
 package:
-  individually: true
+  # On s'assure de ne déployer que le strict nécessaire
   patterns:
-    - '!**/.git/**'
-    - '!**/__pycache__/**'
-    - '!**/*.pyc'
-    - '!**/.pytest_cache/**'
-    - '!tests/**'
-    - '!scripts/**'
-    - '!ui/**'
+    - handler.py
+    - '!**/*'
+    - '!.git/**'
     - '!node_modules/**'
     - '!venv/**'
-    - '!slim-venv/**'
-    - '!.serverless/**'
+    - '!__pycache__/**'
 
 functions:
-  health:
-    name: ${self:service}-${self:provider.stage}-health
-    handler: handler.health
-    memorySize: 128
-    timeout: 5
-    package:
-      patterns:
-        - '!**/*'
-        - handler.py
-        - index.html
-    events:
-      - http:
-          path: health
-          method: get
-          cors: true
-
   predict:
-    name: ${self:service}-${self:provider.stage}-predict
     handler: handler.predict
-    memorySize: 2048
-    timeout: 28
-    package:
-      patterns:
-        - '!**/*'
-        - handler.py
-        - RandomForest.pkl
-        - schemas/**         # si utilisé
-        - payload.json        # si utilisé par vos tests
-        - features_input.json # si utilisé par vos tests
-
+    layers:
+      - arn:aws:lambda:eu-west-3:571600829584:layer:sklearn-numpy-py312:1
     events:
-      - http:
-          path: predict
-          method: post
-          cors:
-            origins:
-              - https://form.mlopstheotiste.fr
-              - https://dbc4cwxk7w17p.cloudfront.net
-            headers:
-              - Content-Type
-            allowCredentials: false 
-    
+      - httpApi:
+          method: POST
+          path: /predict
 
-outputs:
-  ServiceEndpoint:
-    Description: Base URL
-    Value:
-      Fn::Join:
-        - ''
-        - - https://
-          - Ref: ApiGatewayRestApi
-          - .execute-api.
-          - Ref: AWS::Region
-          - .amazonaws.com/
-          - ${self:provider.stage}
-
-  HealthUrl:
-    Description: Healthcheck URL
-    Value:
-      Fn::Join:
-        - ''
-        - - https://
-          - Ref: ApiGatewayRestApi
-          - .execute-api.
-          - Ref: AWS::Region
-          - .amazonaws.com/
-          - ${self:provider.stage}
-          - /health
-
-  PredictUrl:
-    Description: Predict URL
-    Value:
-      Fn::Join:
-        - ''
-        - - https://
-          - Ref: ApiGatewayRestApi
-          - .execute-api.
-          - Ref: AWS::Region
-          - .amazonaws.com/
-          - ${self:provider.stage}
-          - /predict
+  health:
+    handler: handler.health
+    events:
+      - httpApi:
+          method: GET
+          path: /health
